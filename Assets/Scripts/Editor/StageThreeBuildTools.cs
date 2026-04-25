@@ -1,0 +1,88 @@
+#if UNITY_EDITOR
+using System;
+using System.IO;
+using UnityEditor;
+using UnityEditor.Build.Reporting;
+using UnityEngine;
+
+namespace SweetJumpJump.Editor
+{
+    public static class StageThreeBuildTools
+    {
+        private const string MainScenePath = "Assets/Scenes/MainScene.unity";
+        private const string IOSExportPath = "Builds/iOS";
+
+        [MenuItem("Tools/SweetJumpJump/Configure iPad Build")]
+        public static void ConfigureIPadBuild()
+        {
+            PlayerSettings.productName = "甜姐的跳跳棋";
+            PlayerSettings.companyName = "lvzhipeng";
+            PlayerSettings.applicationIdentifier = "com.lvzhipeng.sweetjumpjump";
+            PlayerSettings.defaultInterfaceOrientation = UIOrientation.Portrait;
+            PlayerSettings.allowedAutorotateToPortrait = true;
+            PlayerSettings.allowedAutorotateToPortraitUpsideDown = true;
+            PlayerSettings.allowedAutorotateToLandscapeLeft = false;
+            PlayerSettings.allowedAutorotateToLandscapeRight = false;
+            PlayerSettings.SetScriptingBackend(BuildTargetGroup.iOS, ScriptingImplementation.IL2CPP);
+            PlayerSettings.iOS.targetDevice = iOSTargetDevice.iPadOnly;
+            PlayerSettings.iOS.targetOSVersionString = "13.0";
+            PlayerSettings.iOS.appleEnableAutomaticSigning = true;
+            PlayerSettings.iOS.appleDeveloperTeamID = "J3M89K2N56";
+
+            EditorBuildSettings.scenes = new[]
+            {
+                new EditorBuildSettingsScene(MainScenePath, true)
+            };
+
+            AssetDatabase.SaveAssets();
+            Debug.Log("iPad build settings configured for portrait iPad play.");
+        }
+
+        [MenuItem("Tools/SweetJumpJump/Verify Stage Three")]
+        public static void VerifyStageThree()
+        {
+            StageOneVerifier.Run();
+            StageTwoVerifier.Run();
+            ConfigureIPadBuild();
+
+            Assert(File.Exists(MainScenePath), "MainScene must exist before iOS export.");
+            Assert(PlayerSettings.defaultInterfaceOrientation == UIOrientation.Portrait, "iPad build must default to portrait.");
+            Assert(PlayerSettings.iOS.targetDevice == iOSTargetDevice.iPadOnly, "iOS target device should be iPad only.");
+            Assert(PlayerSettings.GetScriptingBackend(BuildTargetGroup.iOS) == ScriptingImplementation.IL2CPP, "iOS build should use IL2CPP.");
+
+            Debug.Log("StageThreeVerifier passed: stage one/two regressions, portrait iPad settings, and iOS export readiness.");
+        }
+
+        [MenuItem("Tools/SweetJumpJump/Export Xcode Project")]
+        public static void ExportXcodeProject()
+        {
+            ConfigureIPadBuild();
+            Directory.CreateDirectory(IOSExportPath);
+
+            BuildPlayerOptions options = new BuildPlayerOptions
+            {
+                scenes = new[] { MainScenePath },
+                locationPathName = IOSExportPath,
+                target = BuildTarget.iOS,
+                options = BuildOptions.None
+            };
+
+            BuildReport report = BuildPipeline.BuildPlayer(options);
+            if (report.summary.result != BuildResult.Succeeded)
+            {
+                throw new InvalidOperationException("Xcode export failed: " + report.summary.result);
+            }
+
+            Debug.Log("Xcode project exported to " + Path.GetFullPath(IOSExportPath));
+        }
+
+        private static void Assert(bool condition, string message)
+        {
+            if (!condition)
+            {
+                throw new InvalidOperationException(message);
+            }
+        }
+    }
+}
+#endif
