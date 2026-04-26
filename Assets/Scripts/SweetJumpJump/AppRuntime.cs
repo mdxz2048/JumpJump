@@ -17,6 +17,7 @@ namespace SweetJumpJump
         public Image SlotRingImage;
         public Image PieceShadowImage;
         public Image PieceImage;
+        public Image PieceSelectionHighlight;
         public Image HintImage;
         public Image SelectionRing;
     }
@@ -38,12 +39,91 @@ namespace SweetJumpJump
 
     public sealed class AppController : MonoBehaviour
     {
+        private enum ButtonLabelLength
+        {
+            Auto,
+            TwoCharacters,
+            FourCharacters,
+            SixCharacters
+        }
+
+        private struct ButtonLabelProfile
+        {
+            public int MaxFontSize;
+            public int MinFontSize;
+            public float HorizontalPadding;
+        }
+
+        private sealed class ButtonLabelFitter : MonoBehaviour
+        {
+            public Text Label;
+            public ButtonLabelLength Length;
+
+            private string lastText;
+            private Vector2 lastSize;
+
+            public void ApplyNow()
+            {
+                if (Label == null)
+                {
+                    return;
+                }
+
+                ApplyButtonLabelStyle(Label, Label.text, Length);
+                lastText = Label.text;
+                lastSize = Label.rectTransform.rect.size;
+            }
+
+            private void LateUpdate()
+            {
+                if (Label == null)
+                {
+                    return;
+                }
+
+                Vector2 size = Label.rectTransform.rect.size;
+                if (lastText != Label.text || lastSize != size)
+                {
+                    ApplyNow();
+                }
+            }
+        }
+
+        // 棋盘整体缩放后，距离棋盘容器边缘保留的比例。调大棋盘会更小、更不贴边。
+        private const float BoardSafeMarginRatio = 0.015f;
+        // 单个六边形格子的基准外接圆半径。真正显示时会按 iPad 屏幕缩放。
+        private const float BoardBaseCellRadius = 61f;
+        // 单个六边形格子的基准宽高，等于外接圆直径。
+        private const float BoardBaseCellSize = BoardBaseCellRadius * 2f;
+        // 六边形里面的小圆单线外框基准直径；小圆半径约为 35。
+        private const float BoardBaseSlotRingSize = 70f;
+        // 棋子阴影基准直径，略大于棋子本体。
+        private const float BoardBasePieceShadowSize = 96f;
+        // 棋子本体基准直径；棋子纹理内部实际圆半径见 GeneratePieceSprite 里的 86。
+        private const float BoardBasePieceSize = 94f;
+        // 选中棋子局部高光层基准直径。
+        private const float BoardBaseSelectionSize = 82f;
+
+        // BoardCellColor：普通六边形格子的填充色和边框整体色调，保持接近冰蓝棋盘。
+        private static readonly Color BoardCellColor = new Color(0.86f, 0.93f, 0.98f, 0.86f);
+        // BoardTargetColor：选中棋子后，可走目标六边形的格子高亮色。
+        private static readonly Color BoardTargetColor = new Color(0.97f, 1f, 1f, 0.98f);
+        // BoardSlotRingColor：每个六边形内部小圆单线的默认颜色。
+        private static readonly Color BoardSlotRingColor = new Color(0.56f, 0.62f, 0.66f, 0.72f);
+        // BoardTargetRingColor：可走目标位置的小圆单线颜色，通常比默认小圆更亮。
+        private static readonly Color BoardTargetRingColor = new Color(0.32f, 0.66f, 1f, 0.92f);
+        // BoardTargetDotColor：可走目标位置中心实心提示点的颜色。
+        private static readonly Color BoardTargetDotColor = new Color(1f, 0.48f, 0.05f, 0.82f);
+        // BoardSelectionColor：选中棋子时叠在棋子上的局部亮斑颜色，不是整格外圈。
+        private static readonly Color BoardSelectionColor = new Color(1f, 1f, 1f, 0.72f);
+
         private static AppController instance;
         private static Sprite cachedCircleSprite;
         private static Sprite cachedHexCellSprite;
         private static Sprite cachedHexGlowSprite;
         private static Sprite cachedRingSprite;
         private static Sprite cachedPieceSprite;
+        private static Sprite cachedPieceHighlightSprite;
         private static Sprite cachedMountainSprite;
 
         private readonly Dictionary<HexCoord, BoardCellView> cellViews = new Dictionary<HexCoord, BoardCellView>();
@@ -71,13 +151,13 @@ namespace SweetJumpJump
         private GameObject victoryModal;
 
         private Text splashTitleText;
-        private Text currentPlayerText;
         private Text statusText;
         private Text roomTitleText;
         private Text victoryText;
         private Text optionsSummaryText;
         private Text roomEditTitleText;
         private Text roomEditValidationText;
+        private Image currentPlayerPieceImage;
 
         private Button finishTurnButton;
         private Button passTurnButton;
@@ -103,6 +183,7 @@ namespace SweetJumpJump
         private float promptElapsedSeconds;
         private bool promptShown;
         private bool victorySoundPlayed;
+        private Vector2 lastBoardContainerSize;
         private ThemePalette activeTheme;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -129,7 +210,7 @@ namespace SweetJumpJump
             instance = this;
             DontDestroyOnLoad(gameObject);
 
-            defaultFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            defaultFont = GetDefaultFont();
             EnsureSceneScaffold();
             SetupAudio();
             saveData = SaveManager.Load();
@@ -142,6 +223,7 @@ namespace SweetJumpJump
 
         private void Update()
         {
+            UpdateBoardLayoutIfNeeded();
             UpdateSelectionPulse();
             RefreshMusicState();
 
@@ -206,6 +288,23 @@ namespace SweetJumpJump
             sfxClips["victory"] = CreateArpeggioClip("victory", new[] { 660f, 880f, 990f, 1320f }, 0.42f, 0.28f);
             musicClip = CreateMusicLoop();
             musicSource.clip = musicClip;
+        }
+
+        private Font GetDefaultFont()
+        {
+            string[] preferredFonts =
+            {
+                "PingFang SC",
+                "PingFangSC-Regular",
+                "Heiti SC",
+                "STHeiti",
+                "Hiragino Sans GB",
+                "Arial Unicode MS",
+                "Arial"
+            };
+
+            Font font = Font.CreateDynamicFontFromOSFont(preferredFonts, 32);
+            return font != null ? font : Resources.GetBuiltinResource<Font>("Arial.ttf");
         }
 
         private void BuildUi()
@@ -301,15 +400,26 @@ namespace SweetJumpJump
                 statusText.text = string.Format("{0}\nAI 思考中...", session.StatusMessage);
                 yield return new WaitForSeconds(0.8f);
                 MoveOption move = session.GetBestAiMove();
-                session.ApplyAiMove(move);
-                ResetPromptTimer();
-                RefreshBoard();
-                if (move != null)
+                if (move == null)
                 {
-                    PlaySfx("move");
-                    StartCoroutine(AnimatePiecePulse(move.FinalPosition, 1.18f, 0.18f));
+                    session.ApplyAiMove(null);
+                    ResetPromptTimer();
+                    RefreshBoard();
+                    yield return new WaitForSeconds(0.2f);
+                    continue;
                 }
-                yield return new WaitForSeconds(0.2f);
+
+                for (int i = 0; i < move.Path.Count; i++)
+                {
+                    HexCoord stepPosition = session.ApplyAiMoveStep(move, i);
+                    ResetPromptTimer();
+                    RefreshBoard();
+                    PlaySfx("move");
+                    StartCoroutine(AnimatePiecePulse(stepPosition, 1.18f, 0.18f));
+                    yield return new WaitForSeconds(0.5f);
+                }
+
+                yield return new WaitForSeconds(0.15f);
             }
 
             if (session != null && session.IsGameOver)
@@ -335,18 +445,24 @@ namespace SweetJumpJump
                 bool isSelected = piece != null && piece.PieceId == session.SelectedPieceId;
 
                 view.BaseImage.color = isTarget
-                    ? activeTheme.Target
-                    : activeTheme.Cell;
+                    ? BoardTargetColor
+                    : BoardCellColor;
                 if (view.SlotRingImage != null)
                 {
                     view.SlotRingImage.color = isTarget
-                        ? new Color(0.95f, 1f, 1f, 0.9f)
-                        : new Color(0.33f, 0.38f, 0.42f, 0.4f);
+                        ? BoardTargetRingColor
+                        : BoardSlotRingColor;
                 }
 
                 view.HintImage.gameObject.SetActive(isTarget);
+                view.HintImage.color = BoardTargetDotColor;
                 view.SelectionRing.gameObject.SetActive(isSelected);
-                view.SelectionRing.color = activeTheme.Selection;
+                view.SelectionRing.color = BoardSelectionColor;
+                if (view.PieceSelectionHighlight != null)
+                {
+                    view.PieceSelectionHighlight.gameObject.SetActive(isSelected);
+                    view.PieceSelectionHighlight.color = BoardSelectionColor;
+                }
                 if (view.PieceShadowImage != null)
                 {
                     view.PieceShadowImage.gameObject.SetActive(piece != null);
@@ -356,15 +472,19 @@ namespace SweetJumpJump
 
                 if (piece != null)
                 {
-                    view.PieceImage.color = BoardLayout.GetPieceColor(piece.Owner);
+                    view.PieceImage.color = SoftenPieceColor(BoardLayout.GetPieceColor(piece.Owner));
                     if (!isSelected)
                     {
                         view.PieceImage.transform.localScale = Vector3.one;
+                        if (view.PieceSelectionHighlight != null)
+                        {
+                            view.PieceSelectionHighlight.transform.localScale = Vector3.one;
+                        }
                     }
                 }
             }
 
-            currentPlayerText.text = string.Format("当前玩家：{0}", session.CurrentPlayerLabel);
+            RefreshCurrentPlayerPieceIndicator();
             statusText.text = session.StatusMessage;
             bool showPassButton = session.CanPass && !session.CanFinishTurn;
             finishTurnButton.gameObject.SetActive(!showPassButton);
@@ -380,10 +500,39 @@ namespace SweetJumpJump
             }
         }
 
+        private static Color SoftenPieceColor(Color color)
+        {
+            Color softened = Color.Lerp(color, Color.white, 0.22f);
+            softened.r = Mathf.Clamp01(softened.r);
+            softened.g = Mathf.Clamp01(softened.g);
+            softened.b = Mathf.Clamp01(softened.b);
+            softened.a = color.a;
+            return softened;
+        }
+
+        private void RefreshCurrentPlayerPieceIndicator()
+        {
+            if (currentPlayerPieceImage == null || session == null)
+            {
+                return;
+            }
+
+            currentPlayerPieceImage.gameObject.SetActive(!session.IsGameOver);
+            currentPlayerPieceImage.color = SoftenPieceColor(BoardLayout.GetPieceColor(session.CurrentPlayerSlot));
+        }
+
         private void ShowVictory()
         {
-            victoryText.text = session == null ? string.Empty : session.WinnerLabel;
-            victoryModal.SetActive(session != null && session.IsGameOver);
+            if (victoryModal != null)
+            {
+                victoryModal.SetActive(false);
+            }
+
+            if (statusText != null && session != null && !string.IsNullOrEmpty(session.StatusMessage))
+            {
+                statusText.text = session.StatusMessage;
+            }
+
             finishTurnButton.interactable = false;
             passTurnButton.interactable = false;
             undoButton.interactable = false;
@@ -391,7 +540,6 @@ namespace SweetJumpJump
             {
                 victorySoundPlayed = true;
                 PlaySfx("victory");
-                StartCoroutine(AnimateVictoryModal());
             }
         }
 
@@ -599,7 +747,7 @@ namespace SweetJumpJump
             for (int i = 0; i < saveData.Rooms.Count; i++)
             {
                 RoomConfig room = saveData.Rooms[i];
-                GameObject card = new GameObject("RoomCard", typeof(Image));
+                GameObject card = new GameObject("RoomCard", typeof(RectTransform), typeof(Image));
                 card.transform.SetParent(roomCardContainer, false);
 
                 Image cardImage = card.GetComponent<Image>();
@@ -613,10 +761,11 @@ namespace SweetJumpJump
                 layout.childForceExpandHeight = false;
 
                 LayoutElement element = card.AddComponent<LayoutElement>();
-                element.preferredHeight = 280f;
+                element.preferredHeight = 380f;
 
-                CreateText("RoomName", card.transform, room.RoomName, 48, FontStyle.Bold, new Color(0.47f, 0.22f, 0.31f), TextAnchor.MiddleLeft);
-                CreateText(
+                Text roomName = CreateText("RoomName", card.transform, room.RoomName, 48, FontStyle.Bold, new Color(0.47f, 0.22f, 0.31f), TextAnchor.MiddleLeft);
+                roomName.gameObject.AddComponent<LayoutElement>().preferredHeight = 62f;
+                Text roomBody = CreateText(
                     "RoomBody",
                     card.transform,
                     GetRoomSummary(room),
@@ -624,6 +773,7 @@ namespace SweetJumpJump
                     FontStyle.Normal,
                     new Color(0.53f, 0.35f, 0.42f),
                     TextAnchor.UpperLeft);
+                roomBody.gameObject.AddComponent<LayoutElement>().preferredHeight = 170f;
 
                 GameObject buttonRow = new GameObject("RoomButtonRow", typeof(RectTransform), typeof(HorizontalLayoutGroup));
                 buttonRow.transform.SetParent(card.transform, false);
@@ -672,7 +822,7 @@ namespace SweetJumpJump
             }
 
             return string.Format(
-                "{0} 人对局\n规则：{1}  主题：{2}  催促：{3}/{4}秒\n{5}",
+                "{0} 人对局\n规则：{1}  主题：{2}\n催促：{3}/{4}秒\n{5}",
                 playerCount,
                 BoardLayout.GetRuleLabel(room.RuleVariant),
                 GetThemeLabel(room.ThemeId),
@@ -935,7 +1085,7 @@ namespace SweetJumpJump
                 Text = new Color(0.2f, 0.42f, 0.38f),
                 MutedText = new Color(0.36f, 0.55f, 0.5f),
                 Board = new Color(0f, 0f, 0f, 0f),
-                Cell = new Color(0.78f, 0.9f, 0.98f, 0.9f),
+                Cell = new Color(0.78f, 0.87f, 0.93f, 0.94f),
                 Target = new Color(0.98f, 1f, 1f, 1f),
                 Selection = new Color(1f, 1f, 1f, 0.78f)
             };
@@ -951,7 +1101,7 @@ namespace SweetJumpJump
             Text = new Color(0.47f, 0.22f, 0.31f),
             MutedText = new Color(0.55f, 0.37f, 0.44f),
             Board = new Color(0f, 0f, 0f, 0f),
-            Cell = new Color(0.78f, 0.9f, 0.99f, 0.9f),
+            Cell = new Color(0.78f, 0.87f, 0.93f, 0.94f),
             Target = new Color(0.98f, 1f, 1f, 1f),
             Selection = new Color(1f, 1f, 1f, 0.78f)
         };
@@ -1040,6 +1190,7 @@ namespace SweetJumpJump
                 Image barImage = bottomControlBar.GetComponent<Image>();
                 if (barImage != null)
                 {
+                    // 棋盘底部操作栏半透明黑色遮罩；alpha 越大，背景越暗。
                     barImage.color = new Color(0f, 0f, 0f, 0.48f);
                 }
             }
@@ -1055,10 +1206,12 @@ namespace SweetJumpJump
                 Image image = button.GetComponent<Image>();
                 if (image != null)
                 {
+                    // 棋盘底部按钮默认底色，接近黑色半透明。
                     image.color = new Color(0.02f, 0.025f, 0.03f, 0.88f);
                 }
 
                 ColorBlock colors = button.colors;
+                // 棋盘底部按钮交互状态颜色：normal/highlighted/pressed/disabled。
                 colors.normalColor = new Color(0.02f, 0.025f, 0.03f, 0.88f);
                 colors.highlightedColor = new Color(0.18f, 0.2f, 0.22f, 0.92f);
                 colors.pressedColor = new Color(0f, 0f, 0f, 0.96f);
@@ -1069,8 +1222,13 @@ namespace SweetJumpJump
                 Text label = button.GetComponentInChildren<Text>();
                 if (label != null)
                 {
+                    // 棋盘底部按钮文字颜色；不可点时降低透明度。
                     label.color = new Color(1f, 1f, 1f, button.interactable ? 0.96f : 0.48f);
-                    label.fontSize = button == passTurnButton || button == finishTurnButton ? 34 : 32;
+                    ButtonLabelFitter fitter = button.GetComponent<ButtonLabelFitter>();
+                    if (fitter != null)
+                    {
+                        fitter.ApplyNow();
+                    }
                 }
             }
         }
@@ -1196,9 +1354,13 @@ namespace SweetJumpJump
                 if (piece != null && piece.PieceId == session.SelectedPieceId)
                 {
                     view.PieceImage.transform.localScale = Vector3.one * scale;
+                    if (view.PieceSelectionHighlight != null)
+                    {
+                        view.PieceSelectionHighlight.transform.localScale = Vector3.one * scale;
+                    }
                     if (view.SelectionRing != null)
                     {
-                        view.SelectionRing.color = activeTheme.Selection;
+                        view.SelectionRing.color = BoardSelectionColor;
                     }
                     return;
                 }
@@ -1266,16 +1428,13 @@ namespace SweetJumpJump
                 cellObject.transform.SetParent(boardContainer, false);
 
                 RectTransform rect = cellObject.GetComponent<RectTransform>();
-                rect.sizeDelta = new Vector2(104f, 104f);
-
-                const float hexRadius = 52f;
-                float x = Mathf.Sqrt(3f) * hexRadius * (coord.Q + (coord.R * 0.5f));
-                float y = -1.5f * hexRadius * coord.R;
-                rect.anchoredPosition = new Vector2(x, y);
+                rect.sizeDelta = Vector2.zero;
+                rect.anchoredPosition = Vector2.zero;
 
                 Image baseImage = cellObject.GetComponent<Image>();
                 baseImage.sprite = GenerateHexCellSprite();
-                baseImage.color = activeTheme.Cell;
+                // 单个六边形格子的颜色，运行中会在普通格/可走格之间切换。
+                baseImage.color = BoardCellColor;
 
                 Button button = cellObject.GetComponent<Button>();
                 ColorBlock colors = button.colors;
@@ -1286,8 +1445,9 @@ namespace SweetJumpJump
                 colors.disabledColor = Color.white;
                 button.colors = colors;
 
-                GameObject ringObject = CreateCircleImage("SlotRing", cellObject.transform, 48f, new Color(0.33f, 0.38f, 0.42f, 0.4f));
+                GameObject ringObject = CreateCircleImage("SlotRing", cellObject.transform, BoardBaseSlotRingSize, BoardSlotRingColor);
                 Image ringImage = ringObject.GetComponent<Image>();
+                // 六边形内部的小圆单线，直径由 BoardBaseSlotRingSize 控制。
                 ringImage.sprite = GenerateRingSprite();
 
                 GameObject hintObject = new GameObject("Hint", typeof(RectTransform), typeof(Image));
@@ -1295,27 +1455,37 @@ namespace SweetJumpJump
                 RectTransform hintRect = hintObject.GetComponent<RectTransform>();
                 hintRect.anchorMin = new Vector2(0.5f, 0.5f);
                 hintRect.anchorMax = new Vector2(0.5f, 0.5f);
-                hintRect.sizeDelta = new Vector2(104f, 104f);
+                // 可走目标中心点直径 = 小圆单线直径的 72%。
+                hintRect.sizeDelta = new Vector2(BoardBaseSlotRingSize * 0.72f, BoardBaseSlotRingSize * 0.72f);
                 hintRect.anchoredPosition = Vector2.zero;
                 Image hintImage = hintObject.GetComponent<Image>();
-                hintImage.sprite = GenerateHexGlowSprite();
-                hintImage.color = new Color(1f, 1f, 1f, 0.64f);
+                hintImage.sprite = GenerateCircleSprite();
+                // 可走目标中心点颜色。
+                hintImage.color = BoardTargetDotColor;
                 hintImage.raycastTarget = false;
                 hintImage.gameObject.SetActive(false);
 
-                GameObject shadowObject = CreateCircleImage("PieceShadow", cellObject.transform, 78f, new Color(0.05f, 0.08f, 0.11f, 0.28f));
+                // 棋子阴影颜色，偏黑蓝并带透明度。
+                GameObject shadowObject = CreateCircleImage("PieceShadow", cellObject.transform, BoardBasePieceShadowSize, new Color(0.04f, 0.06f, 0.08f, 0.3f));
                 Image shadowImage = shadowObject.GetComponent<Image>();
-                shadowObject.GetComponent<RectTransform>().anchoredPosition = new Vector2(7f, -8f);
+                shadowObject.GetComponent<RectTransform>().anchoredPosition = Vector2.zero;
                 shadowImage.gameObject.SetActive(false);
 
-                GameObject pieceObject = CreateCircleImage("Piece", cellObject.transform, 76f, Color.white);
+                GameObject pieceObject = CreateCircleImage("Piece", cellObject.transform, BoardBasePieceSize, Color.white);
                 Image pieceImage = pieceObject.GetComponent<Image>();
+                // 棋子贴图是灰度光照纹理，真正颜色来自 BoardLayout.GetPieceColor。
                 pieceImage.sprite = GeneratePieceSprite();
                 pieceImage.gameObject.SetActive(false);
 
-                GameObject selectionObject = CreateCircleImage("Selection", cellObject.transform, 96f, new Color(1f, 1f, 1f, 0.78f));
+                GameObject highlightObject = CreateCircleImage("PieceSelectionHighlight", cellObject.transform, BoardBasePieceSize, BoardSelectionColor);
+                Image highlightImage = highlightObject.GetComponent<Image>();
+                // 选中棋子的局部亮斑。
+                highlightImage.sprite = GeneratePieceHighlightSprite();
+                highlightImage.gameObject.SetActive(false);
+
+                GameObject selectionObject = CreateCircleImage("Selection", cellObject.transform, BoardBaseSelectionSize, BoardSelectionColor);
                 Image selectionImage = selectionObject.GetComponent<Image>();
-                selectionImage.sprite = GenerateRingSprite();
+                selectionImage.sprite = GeneratePieceHighlightSprite();
                 selectionImage.gameObject.SetActive(false);
 
                 BoardCellView view = cellObject.AddComponent<BoardCellView>();
@@ -1325,17 +1495,128 @@ namespace SweetJumpJump
                 view.SlotRingImage = ringImage;
                 view.PieceShadowImage = shadowImage;
                 view.PieceImage = pieceImage;
+                view.PieceSelectionHighlight = highlightImage;
                 view.HintImage = hintImage;
                 view.SelectionRing = selectionImage;
 
                 button.onClick.AddListener(() => HandleCellClicked(coord));
                 cellViews[coord] = view;
             }
+
+            UpdateBoardLayout(true);
+        }
+
+        private void UpdateBoardLayoutIfNeeded()
+        {
+            if (boardContainer == null || cellViews.Count == 0)
+            {
+                return;
+            }
+
+            Vector2 size = boardContainer.rect.size;
+            if (Mathf.Abs(size.x - lastBoardContainerSize.x) > 0.5f || Mathf.Abs(size.y - lastBoardContainerSize.y) > 0.5f)
+            {
+                UpdateBoardLayout(false);
+            }
+        }
+
+        private void UpdateBoardLayout(bool force)
+        {
+            if (boardContainer == null || cellViews.Count == 0)
+            {
+                return;
+            }
+
+            Vector2 containerSize = boardContainer.rect.size;
+            if (containerSize.x <= 1f || containerSize.y <= 1f)
+            {
+                containerSize = boardContainer.sizeDelta;
+            }
+
+            if (!force && (containerSize.x <= 1f || containerSize.y <= 1f))
+            {
+                return;
+            }
+
+            float radius = CalculateAdaptiveBoardRadius(containerSize);
+            Vector2 centerOffset = CalculateBoardCenterOffset(radius);
+
+            foreach (BoardCellView view in cellViews.Values)
+            {
+                float x = Mathf.Sqrt(3f) * radius * (view.Coord.Q + (view.Coord.R * 0.5f)) - centerOffset.x;
+                float y = -1.5f * radius * view.Coord.R - centerOffset.y;
+
+                RectTransform cellRect = view.GetComponent<RectTransform>();
+                cellRect.sizeDelta = new Vector2(radius * 2f, radius * 2f);
+                cellRect.anchoredPosition = new Vector2(x, y);
+
+                SetRectSize(view.HintImage, BoardBaseSlotRingSize * 0.72f * radius / BoardBaseCellRadius);
+                SetRectSize(view.SlotRingImage, BoardBaseSlotRingSize * radius / BoardBaseCellRadius);
+                SetRectSize(view.PieceShadowImage, BoardBasePieceShadowSize * radius / BoardBaseCellRadius);
+                SetRectSize(view.PieceImage, BoardBasePieceSize * radius / BoardBaseCellRadius);
+                SetRectSize(view.PieceSelectionHighlight, BoardBasePieceSize * radius / BoardBaseCellRadius);
+                SetRectSize(view.SelectionRing, BoardBaseSelectionSize * radius / BoardBaseCellRadius);
+
+                if (view.PieceShadowImage != null)
+                {
+                    view.PieceShadowImage.rectTransform.anchoredPosition = new Vector2(8f, -9f) * radius / BoardBaseCellRadius;
+                }
+            }
+
+            lastBoardContainerSize = containerSize;
+        }
+
+        private static void SetRectSize(Graphic graphic, float size)
+        {
+            if (graphic == null)
+            {
+                return;
+            }
+
+            graphic.rectTransform.sizeDelta = new Vector2(size, size);
+        }
+
+        private static float CalculateAdaptiveBoardRadius(Vector2 containerSize)
+        {
+            Vector4 bounds = CalculateBoardBounds(1f);
+            float boardWidth = bounds.z - bounds.x;
+            float boardHeight = bounds.w - bounds.y;
+            float safeWidth = containerSize.x * (1f - BoardSafeMarginRatio * 2f);
+            float safeHeight = containerSize.y * (1f - BoardSafeMarginRatio * 2f);
+            return Mathf.Max(1f, Mathf.Min(safeWidth / boardWidth, safeHeight / boardHeight));
+        }
+
+        private static Vector2 CalculateBoardCenterOffset(float radius)
+        {
+            Vector4 bounds = CalculateBoardBounds(radius);
+            return new Vector2((bounds.x + bounds.z) * 0.5f, (bounds.y + bounds.w) * 0.5f);
+        }
+
+        private static Vector4 CalculateBoardBounds(float radius)
+        {
+            IReadOnlyList<HexCoord> cells = BoardLayout.AllCells;
+            float minX = float.MaxValue;
+            float minY = float.MaxValue;
+            float maxX = float.MinValue;
+            float maxY = float.MinValue;
+
+            for (int i = 0; i < cells.Count; i++)
+            {
+                HexCoord coord = cells[i];
+                float x = Mathf.Sqrt(3f) * radius * (coord.Q + (coord.R * 0.5f));
+                float y = -1.5f * radius * coord.R;
+                minX = Mathf.Min(minX, x - radius);
+                maxX = Mathf.Max(maxX, x + radius);
+                minY = Mathf.Min(minY, y - radius);
+                maxY = Mathf.Max(maxY, y + radius);
+            }
+
+            return new Vector4(minX, minY, maxX, maxY);
         }
 
         private void BuildSplashPanel()
         {
-            CreateText("SplashCaption", splashPanel, "温暖 · 可爱 · 本地对战", 36, FontStyle.Normal, new Color(0.64f, 0.4f, 0.48f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.43f), new Vector2(0.5f, 0.43f), new Vector2(900f, 60f));
+            CreateText("SplashCaption", splashPanel, "农夫山泉有点甜", 36, FontStyle.Normal, new Color(0.64f, 0.4f, 0.48f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.43f), new Vector2(0.5f, 0.43f), new Vector2(900f, 60f));
             splashTitleText = CreateText("SplashTitle", splashPanel, "甜姐的跳跳棋", 96, FontStyle.Bold, new Color(0.73f, 0.24f, 0.42f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.54f), new Vector2(0.5f, 0.54f), new Vector2(1200f, 140f));
             CreateText("SplashDecor", splashPanel, "★  ○  ✦  ○  ★", 50, FontStyle.Bold, new Color(1f, 0.74f, 0.82f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.33f), new Vector2(0.5f, 0.33f), new Vector2(900f, 80f));
         }
@@ -1343,7 +1624,7 @@ namespace SweetJumpJump
         private void BuildMenuPanel()
         {
             CreateText("MenuTitle", menuPanel, "甜姐的跳跳棋", 88, FontStyle.Bold, new Color(0.72f, 0.24f, 0.41f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.76f), new Vector2(0.5f, 0.76f), new Vector2(1100f, 120f));
-            CreateText("MenuSubtitle", menuPanel, "第一阶段 MVP：Splash、默认房间、121 格棋盘、真人 vs AI", 34, FontStyle.Normal, new Color(0.55f, 0.37f, 0.44f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.67f), new Vector2(0.5f, 0.67f), new Vector2(1200f, 80f));
+            CreateText("MenuSubtitle", menuPanel, "甜姐第一 比赛第二", 34, FontStyle.Normal, new Color(0.55f, 0.37f, 0.44f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.67f), new Vector2(0.5f, 0.67f), new Vector2(1200f, 80f));
 
             CreateButton(menuPanel, "开始游戏", ShowRooms, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(620f, 116f), Vector2.zero);
             CreateButton(menuPanel, "游戏选项", ShowOptions, new Vector2(0.5f, 0.41f), new Vector2(0.5f, 0.41f), new Vector2(620f, 116f), Vector2.zero);
@@ -1456,10 +1737,13 @@ namespace SweetJumpJump
             GameObject boardObject = new GameObject("BoardContainer", typeof(RectTransform), typeof(Image));
             boardContainer = boardObject.GetComponent<RectTransform>();
             boardContainer.SetParent(gamePanel, false);
-            boardContainer.anchorMin = new Vector2(0.5f, 0.54f);
-            boardContainer.anchorMax = new Vector2(0.5f, 0.54f);
-            boardContainer.sizeDelta = new Vector2(1400f, 1480f);
+            // 棋盘容器占屏幕的区域：底部留给状态文字和按钮，顶部留少量房间标题空间。
+            boardContainer.anchorMin = new Vector2(0f, 0.14f);
+            boardContainer.anchorMax = new Vector2(1f, 0.972f);
+            boardContainer.offsetMin = Vector2.zero;
+            boardContainer.offsetMax = Vector2.zero;
             Image boardImage = boardObject.GetComponent<Image>();
+            // 棋盘容器自身透明，真正的背景由 GamePanel 的雪山图负责。
             boardImage.color = Color.clear;
             boardImage.raycastTarget = false;
 
@@ -1469,17 +1753,27 @@ namespace SweetJumpJump
             bottomControlBar.anchorMin = new Vector2(0f, 0f);
             bottomControlBar.anchorMax = new Vector2(1f, 0f);
             bottomControlBar.pivot = new Vector2(0.5f, 0f);
-            bottomControlBar.sizeDelta = new Vector2(0f, 220f);
+            bottomControlBar.sizeDelta = new Vector2(0f, 300f);
             bottomControlBar.anchoredPosition = Vector2.zero;
+            // 首次创建时的底部栏颜色；运行中 RefreshGameChromeStyle 会继续统一刷新。
             barObject.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.47f);
 
-            currentPlayerText = CreateText("CurrentPlayer", bottomControlBar, "当前玩家：", 26, FontStyle.Bold, new Color(1f, 1f, 1f, 0.72f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.68f), new Vector2(0.5f, 0.68f), new Vector2(1120f, 42f));
-            statusText = CreateText("Status", bottomControlBar, "请选择一个棋子。", 34, FontStyle.Normal, new Color(1f, 1f, 1f, 0.92f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.52f), new Vector2(0.5f, 0.52f), new Vector2(1300f, 58f));
+            // 当前回合提示不显示文字，只显示当前玩家阵营的一颗棋子。
+            GameObject currentPieceObject = CreateCircleImage("CurrentPlayerPiece", bottomControlBar, 58f, Color.white);
+            RectTransform currentPieceRect = currentPieceObject.GetComponent<RectTransform>();
+            currentPieceRect.anchorMin = new Vector2(0.5f, 0.69f);
+            currentPieceRect.anchorMax = new Vector2(0.5f, 0.69f);
+            currentPlayerPieceImage = currentPieceObject.GetComponent<Image>();
+            currentPlayerPieceImage.sprite = GeneratePieceSprite();
 
-            undoButton = CreateButton(bottomControlBar, "悔棋", HandleUndo, new Vector2(0.34f, 0.2f), new Vector2(0.34f, 0.2f), new Vector2(240f, 72f), Vector2.zero);
-            finishTurnButton = CreateButton(bottomControlBar, "完成移动", HandleFinishTurn, new Vector2(0.66f, 0.2f), new Vector2(0.66f, 0.2f), new Vector2(280f, 72f), Vector2.zero);
-            passTurnButton = CreateButton(bottomControlBar, "放弃移动", HandlePassTurn, new Vector2(0.66f, 0.2f), new Vector2(0.66f, 0.2f), new Vector2(280f, 72f), Vector2.zero);
-            Button roomsButton = CreateButton(bottomControlBar, "设置", ShowRooms, new Vector2(0.94f, 0.24f), new Vector2(0.94f, 0.24f), new Vector2(130f, 72f), Vector2.zero);
+            // 底部栏状态文本颜色。
+            statusText = CreateText("Status", bottomControlBar, "请选择一个棋子。", 30, FontStyle.Normal, new Color(1f, 1f, 1f, 0.92f), TextAnchor.MiddleCenter, new Vector2(0.08f, 0.46f), new Vector2(0.92f, 0.46f), new Vector2(0f, 92f));
+            statusText.resizeTextMinSize = 16;
+
+            undoButton = CreateButton(bottomControlBar, "悔棋", HandleUndo, new Vector2(0.23f, 0.16f), new Vector2(0.23f, 0.16f), new Vector2(280f, 82f), Vector2.zero, ButtonLabelLength.TwoCharacters);
+            finishTurnButton = CreateButton(bottomControlBar, "完成移动", HandleFinishTurn, new Vector2(0.5f, 0.16f), new Vector2(0.5f, 0.16f), new Vector2(360f, 82f), Vector2.zero, ButtonLabelLength.FourCharacters);
+            passTurnButton = CreateButton(bottomControlBar, "放弃移动", HandlePassTurn, new Vector2(0.5f, 0.16f), new Vector2(0.5f, 0.16f), new Vector2(360f, 82f), Vector2.zero, ButtonLabelLength.FourCharacters);
+            Button roomsButton = CreateButton(bottomControlBar, "设置", ShowRooms, new Vector2(0.77f, 0.16f), new Vector2(0.77f, 0.16f), new Vector2(280f, 82f), Vector2.zero, ButtonLabelLength.TwoCharacters);
             gameChromeButtons.Add(undoButton);
             gameChromeButtons.Add(finishTurnButton);
             gameChromeButtons.Add(passTurnButton);
@@ -1597,6 +1891,9 @@ namespace SweetJumpJump
             label.alignment = anchor;
             label.horizontalOverflow = HorizontalWrapMode.Wrap;
             label.verticalOverflow = VerticalWrapMode.Overflow;
+            label.resizeTextForBestFit = true;
+            label.resizeTextMinSize = Mathf.Max(16, Mathf.RoundToInt(fontSize * 0.68f));
+            label.resizeTextMaxSize = fontSize;
             return label;
         }
 
@@ -1632,7 +1929,7 @@ namespace SweetJumpJump
             return input;
         }
 
-        private Button CreateButton(Transform parent, string label, Action onClick, Vector2 anchorMin, Vector2 anchorMax, Vector2 size, Vector2 offset)
+        private Button CreateButton(Transform parent, string label, Action onClick, Vector2 anchorMin, Vector2 anchorMax, Vector2 size, Vector2 offset, ButtonLabelLength labelLength = ButtonLabelLength.Auto)
         {
             GameObject buttonObject = new GameObject(label, typeof(RectTransform), typeof(Image), typeof(Button));
             buttonObject.transform.SetParent(parent, false);
@@ -1666,7 +1963,129 @@ namespace SweetJumpJump
             buttonText.rectTransform.offsetMin = Vector2.zero;
             buttonText.rectTransform.offsetMax = Vector2.zero;
 
+            ButtonLabelFitter fitter = buttonObject.AddComponent<ButtonLabelFitter>();
+            fitter.Label = buttonText;
+            fitter.Length = labelLength;
+            fitter.ApplyNow();
+
             return button;
+        }
+
+        private static void ApplyButtonLabelStyle(Text label, string value, ButtonLabelLength length)
+        {
+            ButtonLabelProfile profile = GetButtonLabelProfile(length == ButtonLabelLength.Auto ? ResolveButtonLabelLength(value) : length);
+            RectTransform rect = label.rectTransform;
+            rect.offsetMin = new Vector2(profile.HorizontalPadding, 0f);
+            rect.offsetMax = new Vector2(-profile.HorizontalPadding, 0f);
+
+            label.horizontalOverflow = HorizontalWrapMode.Overflow;
+            label.verticalOverflow = VerticalWrapMode.Overflow;
+            label.resizeTextForBestFit = false;
+            label.alignByGeometry = true;
+            label.fontSize = GetSingleLineFontSize(label, value, profile);
+        }
+
+        private static ButtonLabelLength ResolveButtonLabelLength(string value)
+        {
+            int count = CountDisplayCharacters(value);
+            if (count <= 2)
+            {
+                return ButtonLabelLength.TwoCharacters;
+            }
+
+            if (count <= 4)
+            {
+                return ButtonLabelLength.FourCharacters;
+            }
+
+            return ButtonLabelLength.SixCharacters;
+        }
+
+        private static ButtonLabelProfile GetButtonLabelProfile(ButtonLabelLength length)
+        {
+            switch (length)
+            {
+                case ButtonLabelLength.TwoCharacters:
+                    return new ButtonLabelProfile { MaxFontSize = 32, MinFontSize = 22, HorizontalPadding = 8f };
+                case ButtonLabelLength.FourCharacters:
+                    return new ButtonLabelProfile { MaxFontSize = 32, MinFontSize = 18, HorizontalPadding = 8f };
+                case ButtonLabelLength.SixCharacters:
+                    return new ButtonLabelProfile { MaxFontSize = 30, MinFontSize = 14, HorizontalPadding = 6f };
+                default:
+                    return new ButtonLabelProfile { MaxFontSize = 30, MinFontSize = 14, HorizontalPadding = 6f };
+            }
+        }
+
+        private static int CountDisplayCharacters(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return 0;
+            }
+
+            int count = 0;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (char.IsWhiteSpace(c) || char.IsPunctuation(c) || char.IsSeparator(c) || char.IsSymbol(c))
+                {
+                    continue;
+                }
+
+                count++;
+            }
+
+            return count;
+        }
+
+        private static int GetSingleLineFontSize(Text label, string value, ButtonLabelProfile profile)
+        {
+            float availableWidth = GetAvailableLabelWidth(label);
+            if (availableWidth <= 1f || string.IsNullOrEmpty(value))
+            {
+                return profile.MaxFontSize;
+            }
+
+            for (int fontSize = profile.MaxFontSize; fontSize >= profile.MinFontSize; fontSize--)
+            {
+                if (GetPreferredSingleLineWidth(label, value, fontSize) <= availableWidth)
+                {
+                    return fontSize;
+                }
+            }
+
+            return profile.MinFontSize;
+        }
+
+        private static float GetAvailableLabelWidth(Text label)
+        {
+            RectTransform rect = label.rectTransform;
+            float width = rect.rect.width;
+            if (width > 1f)
+            {
+                return width;
+            }
+
+            RectTransform parentRect = rect.parent as RectTransform;
+            if (parentRect != null)
+            {
+                width = parentRect.rect.width - rect.offsetMin.x + rect.offsetMax.x;
+                if (width > 1f)
+                {
+                    return width;
+                }
+
+                width = parentRect.sizeDelta.x - rect.offsetMin.x + rect.offsetMax.x;
+            }
+
+            return Mathf.Max(0f, width);
+        }
+
+        private static float GetPreferredSingleLineWidth(Text label, string value, int fontSize)
+        {
+            label.fontSize = fontSize;
+            TextGenerationSettings settings = label.GetGenerationSettings(new Vector2(10000f, 1000f));
+            return label.cachedTextGeneratorForLayout.GetPreferredWidth(value, settings) / label.pixelsPerUnit;
         }
 
         private GameObject CreateCircleImage(string name, Transform parent, float size, Color color)
@@ -1698,6 +2117,7 @@ namespace SweetJumpJump
             texture.wrapMode = TextureWrapMode.Clamp;
             Color clear = new Color(0f, 0f, 0f, 0f);
             Vector2 center = new Vector2(63.5f, 63.5f);
+            // 通用实心圆 sprite 的纹理半径；实际 UI 尺寸由 RectTransform 控制。
             float radius = 60f;
 
             for (int y = 0; y < texture.height; y++)
@@ -1724,6 +2144,7 @@ namespace SweetJumpJump
             Texture2D texture = new Texture2D(128, 128, TextureFormat.ARGB32, false);
             texture.wrapMode = TextureWrapMode.Clamp;
             texture.filterMode = FilterMode.Bilinear;
+            // 六边形外边框的纹理半径。这里是贴图坐标半径，不是最终屏幕半径。
             Vector2[] vertices = CreatePointyHexVertices(new Vector2(63.5f, 63.5f), 60f);
             Color clear = new Color(0f, 0f, 0f, 0f);
 
@@ -1739,19 +2160,16 @@ namespace SweetJumpJump
                     }
 
                     float edge = DistanceToPolygonEdge(point, vertices);
-                    float grain = Mathf.PerlinNoise(x * 0.045f, y * 0.045f) * 0.08f;
-                    float bevel = Mathf.Clamp01(edge / 12f);
-                    float shade = Mathf.Lerp(0.68f, 0.96f, bevel) + grain;
-                    if (edge < 2.2f)
-                    {
-                        shade = 0.55f;
-                    }
-                    else if (edge < 6f)
-                    {
-                        shade = Mathf.Lerp(0.64f, shade, edge / 6f);
-                    }
-
-                    float alpha = edge < 1.4f ? 0.78f : 0.94f;
+                    // 格子内部轻微冰面噪声，值越大纹理越明显。
+                    float grain = Mathf.PerlinNoise(x * 0.052f + 1.7f, y * 0.052f + 4.9f) * 0.035f;
+                    // 斜向浅色光照，避免格子太平。
+                    float diagonalLight = Mathf.Clamp01((x * 0.62f + y * 0.38f) / 128f) * 0.025f;
+                    // 六边形边框线：1.4 是线的中心离外边缘距离，除数 1.4 控制线宽。
+                    float line = Mathf.Clamp01(1f - Mathf.Abs(edge - 1.4f) / 1.4f);
+                    // 边框线颜色偏深，格子内部偏亮。
+                    float shade = Mathf.Lerp(1.03f + grain + diagonalLight, 0.58f, line);
+                    // 边框线比格子内部更不透明。
+                    float alpha = Mathf.Lerp(0.66f, 0.96f, line);
                     texture.SetPixel(x, y, new Color(shade, shade, shade, alpha));
                 }
             }
@@ -1772,6 +2190,7 @@ namespace SweetJumpJump
             texture.wrapMode = TextureWrapMode.Clamp;
             texture.filterMode = FilterMode.Bilinear;
             Vector2 center = new Vector2(63.5f, 63.5f);
+            // 可走目标六边形高光用的外轮廓半径。
             Vector2[] vertices = CreatePointyHexVertices(center, 60f);
             Color clear = new Color(0f, 0f, 0f, 0f);
 
@@ -1786,9 +2205,11 @@ namespace SweetJumpJump
                         continue;
                     }
 
-                    float distance = Vector2.Distance(point, center);
                     float edge = DistanceToPolygonEdge(point, vertices);
-                    float alpha = Mathf.Clamp01((1f - distance / 68f) * 0.55f + Mathf.Clamp01(edge / 10f) * 0.22f);
+                    // 高光外边线：2.2 是线中心，除数 2.2 控制线宽和柔边。
+                    float line = Mathf.Clamp01(1f - Mathf.Abs(edge - 2.2f) / 2.2f);
+                    // 可走目标格子的白色边缘高光透明度。
+                    float alpha = Mathf.Lerp(0.1f, 0.62f, line);
                     texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
                 }
             }
@@ -1817,17 +2238,18 @@ namespace SweetJumpJump
                 {
                     Vector2 delta = new Vector2(x, y) - center;
                     float distance = delta.magnitude;
-                    float ring = Mathf.Abs(distance - 42f);
-                    float alpha = Mathf.Clamp01(1f - ring / 4.2f);
+                    // 六边形内部小圆单线的纹理半径。改 38 会改变小圆大小。
+                    float ring = Mathf.Abs(distance - 38f);
+                    // 小圆单线粗细和柔边。数值越大线越粗。
+                    float alpha = Mathf.Clamp01(1f - ring / 2.1f);
                     if (alpha <= 0f)
                     {
                         texture.SetPixel(x, y, clear);
                         continue;
                     }
 
-                    float angle = Mathf.Atan2(delta.y, delta.x);
-                    float nick = Mathf.Sin(angle * 3f + distance * 0.08f) > 0.86f ? 0.38f : 1f;
-                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha * nick));
+                    // 小圆线的贴图灰度；最终显示色还会乘 BoardSlotRingColor/BoardTargetRingColor。
+                    texture.SetPixel(x, y, new Color(0.86f, 0.86f, 0.86f, alpha));
                 }
             }
 
@@ -1843,11 +2265,12 @@ namespace SweetJumpJump
                 return cachedPieceSprite;
             }
 
-            Texture2D texture = new Texture2D(160, 160, TextureFormat.ARGB32, false);
+            Texture2D texture = new Texture2D(192, 192, TextureFormat.ARGB32, false);
             texture.wrapMode = TextureWrapMode.Clamp;
             texture.filterMode = FilterMode.Bilinear;
-            Vector2 center = new Vector2(79.5f, 79.5f);
-            Vector2 highlight = new Vector2(57f, 104f);
+            Vector2 center = new Vector2(95.5f, 95.5f);
+            // 棋子自带的固定亮点位置。
+            Vector2 highlight = new Vector2(72f, 120f);
             Color clear = new Color(0f, 0f, 0f, 0f);
 
             for (int y = 0; y < texture.height; y++)
@@ -1855,21 +2278,32 @@ namespace SweetJumpJump
                 for (int x = 0; x < texture.width; x++)
                 {
                     Vector2 point = new Vector2(x, y);
-                    float radius = Vector2.Distance(point, center);
-                    if (radius > 72f)
+                    Vector2 delta = point - center;
+                    float radius = delta.magnitude;
+                    // 棋子纹理内部实际圆半径。改 86 会影响棋子边缘大小。
+                    if (radius > 86f)
                     {
                         texture.SetPixel(x, y, clear);
                         continue;
                     }
 
-                    float normalized = radius / 72f;
-                    float light = 1f - normalized * 0.62f;
-                    float rings = Mathf.Sin(radius * 0.34f + Mathf.PerlinNoise(x * 0.05f, y * 0.05f) * 6f) * 0.055f;
-                    float wood = Mathf.PerlinNoise((x + 13f) * 0.075f, (y + 41f) * 0.075f) * 0.075f;
-                    float highlightStrength = Mathf.Clamp01(1f - Vector2.Distance(point, highlight) / 38f) * 0.38f;
-                    float rim = Mathf.SmoothStep(0f, 1f, normalized) * 0.26f;
-                    float shade = Mathf.Clamp01(0.82f + light * 0.28f + rings + wood + highlightStrength - rim);
-                    float alpha = Mathf.Clamp01((72f - radius) / 3.5f);
+                    // 86 必须和上面的棋子实际半径保持一致，用来算球面光照。
+                    float normalized = radius / 86f;
+                    float height = Mathf.Sqrt(Mathf.Clamp01(1f - normalized * normalized));
+                    Vector3 normal = new Vector3(delta.x / 86f, delta.y / 86f, height).normalized;
+                    Vector3 lightDirection = new Vector3(-0.42f, 0.58f, 0.7f).normalized;
+                    float lambert = Mathf.Clamp01(Vector3.Dot(normal, lightDirection));
+                    float latitude = Mathf.Sin((normalized * 18f + Mathf.PerlinNoise(x * 0.035f, y * 0.035f) * 1.8f) * Mathf.PI);
+                    float carve = Mathf.Sin(normalized * 62f + Mathf.PerlinNoise((x + 19f) * 0.06f, (y + 37f) * 0.06f) * 3f);
+                    float grain = Mathf.PerlinNoise((x + 13f) * 0.085f, (y + 41f) * 0.085f);
+                    float highlightStrength = Mathf.Clamp01(1f - Vector2.Distance(point, highlight) / 31f);
+                    float rim = Mathf.SmoothStep(0.64f, 1f, normalized);
+                    float shade = 0.76f + lambert * 0.24f + height * 0.08f + latitude * 0.022f + carve * 0.02f + grain * 0.045f;
+                    shade += highlightStrength * 0.14f;
+                    shade -= rim * 0.16f;
+                    shade = Mathf.Clamp01(shade);
+                    // 棋子边缘透明柔化宽度，3.5 越大边缘越软。
+                    float alpha = Mathf.Clamp01((86f - radius) / 3.5f);
                     texture.SetPixel(x, y, new Color(shade, shade, shade, alpha));
                 }
             }
@@ -1877,6 +2311,49 @@ namespace SweetJumpJump
             texture.Apply();
             cachedPieceSprite = Sprite.Create(texture, new Rect(0f, 0f, texture.width, texture.height), new Vector2(0.5f, 0.5f));
             return cachedPieceSprite;
+        }
+
+        private Sprite GeneratePieceHighlightSprite()
+        {
+            if (cachedPieceHighlightSprite != null)
+            {
+                return cachedPieceHighlightSprite;
+            }
+
+            Texture2D texture = new Texture2D(192, 192, TextureFormat.ARGB32, false);
+            texture.wrapMode = TextureWrapMode.Clamp;
+            texture.filterMode = FilterMode.Bilinear;
+            Vector2 center = new Vector2(95.5f, 95.5f);
+            // 选中棋子局部高光中心位置。
+            Vector2 shineCenter = new Vector2(72f, 118f);
+            Color clear = new Color(0f, 0f, 0f, 0f);
+
+            for (int y = 0; y < texture.height; y++)
+            {
+                for (int x = 0; x < texture.width; x++)
+                {
+                    Vector2 point = new Vector2(x, y);
+                    float pieceRadius = Vector2.Distance(point, center);
+                    // 选中高光只允许画在棋子内部，半径略小于棋子本体。
+                    if (pieceRadius > 82f)
+                    {
+                        texture.SetPixel(x, y, clear);
+                        continue;
+                    }
+
+                    Vector2 shineDelta = point - shineCenter;
+                    // 高光椭圆半径：横向 34、纵向 25。改这里可以调亮斑大小。
+                    float oval = Mathf.Sqrt((shineDelta.x * shineDelta.x) / (34f * 34f) + (shineDelta.y * shineDelta.y) / (25f * 25f));
+                    float alpha = Mathf.Clamp01(1f - oval);
+                    // 高光透明度曲线，1.8 越大中心越集中，0.9 是最大透明度。
+                    alpha = Mathf.Pow(alpha, 1.8f) * 0.9f;
+                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+                }
+            }
+
+            texture.Apply();
+            cachedPieceHighlightSprite = Sprite.Create(texture, new Rect(0f, 0f, texture.width, texture.height), new Vector2(0.5f, 0.5f));
+            return cachedPieceHighlightSprite;
         }
 
         private Sprite GenerateMountainBackdropSprite()
@@ -1898,6 +2375,7 @@ namespace SweetJumpJump
                 for (int x = 0; x < width; x++)
                 {
                     float nx = x / (float)(width - 1);
+                    // 雪山背景基础色：淡蓝到白色的渐变。
                     Color color = Color.Lerp(new Color(0.9f, 0.96f, 1f), Color.white, Mathf.Pow(ny, 0.72f));
 
                     float farPeak = MountainHeight(nx, 0.71f, 0.085f, 1.8f, 3.4f);
@@ -1905,9 +2383,10 @@ namespace SweetJumpJump
                     {
                         float depth = Mathf.Clamp01((farPeak - ny) / 0.36f);
                         float snow = Mathf.PerlinNoise(nx * 9f + 2.1f, ny * 13f + 1.7f);
-                        Color rock = Color.Lerp(new Color(0.67f, 0.75f, 0.82f), new Color(0.36f, 0.43f, 0.5f), depth * 0.86f);
-                        Color ice = new Color(0.9f, 0.96f, 1f);
-                        color = Color.Lerp(rock, ice, snow > 0.56f ? 0.48f : 0.16f);
+                        // 远山岩石色和雪色，整体最浅。
+                        Color rock = Color.Lerp(new Color(0.78f, 0.86f, 0.92f), new Color(0.54f, 0.62f, 0.68f), depth * 0.7f);
+                        Color ice = new Color(0.95f, 0.985f, 1f);
+                        color = Color.Lerp(rock, ice, snow > 0.56f ? 0.56f : 0.24f);
                         color.a = 1f;
                     }
 
@@ -1916,9 +2395,10 @@ namespace SweetJumpJump
                     {
                         float depth = Mathf.Clamp01((midPeak - ny) / 0.34f);
                         float snow = Mathf.PerlinNoise(nx * 12f + 7.3f, ny * 17f + 9.2f);
-                        Color rock = Color.Lerp(new Color(0.57f, 0.65f, 0.72f), new Color(0.22f, 0.27f, 0.32f), depth);
-                        Color ice = new Color(0.84f, 0.93f, 1f);
-                        color = Color.Lerp(rock, ice, snow > 0.52f ? 0.55f : 0.1f);
+                        // 中景山体颜色，比远山更深。
+                        Color rock = Color.Lerp(new Color(0.7f, 0.78f, 0.84f), new Color(0.42f, 0.49f, 0.55f), depth * 0.82f);
+                        Color ice = new Color(0.91f, 0.97f, 1f);
+                        color = Color.Lerp(rock, ice, snow > 0.52f ? 0.62f : 0.2f);
                     }
 
                     float frontPeak = MountainHeight(nx + 0.43f, 0.26f, 0.08f, 3.2f, 5.5f);
@@ -1926,9 +2406,10 @@ namespace SweetJumpJump
                     {
                         float depth = Mathf.Clamp01((frontPeak - ny) / 0.28f);
                         float snow = Mathf.PerlinNoise(nx * 18f + 5.8f, ny * 20f + 4.1f);
-                        Color rock = Color.Lerp(new Color(0.49f, 0.57f, 0.63f), new Color(0.13f, 0.17f, 0.21f), depth);
-                        Color ice = new Color(0.78f, 0.9f, 0.98f);
-                        color = Color.Lerp(rock, ice, snow > 0.5f ? 0.44f : 0.08f);
+                        // 前景山体颜色，最深，用来压住底部操作栏后的背景。
+                        Color rock = Color.Lerp(new Color(0.64f, 0.72f, 0.78f), new Color(0.34f, 0.41f, 0.47f), depth * 0.85f);
+                        Color ice = new Color(0.88f, 0.96f, 1f);
+                        color = Color.Lerp(rock, ice, snow > 0.5f ? 0.52f : 0.18f);
                     }
 
                     texture.SetPixel(x, y, color);
@@ -2012,6 +2493,11 @@ namespace SweetJumpJump
             if (label != null)
             {
                 label.text = value;
+                ButtonLabelFitter fitter = button.GetComponent<ButtonLabelFitter>();
+                if (fitter != null)
+                {
+                    fitter.ApplyNow();
+                }
             }
         }
     }

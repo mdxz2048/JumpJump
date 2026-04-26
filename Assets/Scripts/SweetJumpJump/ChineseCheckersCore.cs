@@ -180,18 +180,25 @@ namespace SweetJumpJump
             switch (slotId)
             {
                 case SlotId.Top:
-                    return new Color(0.86f, 0.58f, 0.4f);
+                    // 顶部阵营棋子颜色：橙棕色。
+                    return new Color(0.88f, 0.65f, 0.48f);
                 case SlotId.TopRight:
-                    return new Color(0.58f, 0.42f, 0.95f);
+                    // 右上阵营棋子颜色：蓝色。
+                    return new Color(0.47f, 0.66f, 0.96f);
                 case SlotId.BottomRight:
-                    return new Color(0.55f, 0.74f, 0.68f);
+                    // 右下阵营棋子颜色：黄绿色。
+                    return new Color(0.78f, 0.91f, 0.42f);
                 case SlotId.Bottom:
-                    return new Color(0.91f, 0.48f, 0.63f);
+                    // 底部阵营棋子颜色：粉红。
+                    return new Color(0.92f, 0.55f, 0.68f);
                 case SlotId.BottomLeft:
-                    return new Color(0.42f, 0.64f, 0.98f);
+                    // 左下阵营棋子颜色：紫色。
+                    return new Color(0.64f, 0.48f, 0.96f);
                 case SlotId.TopLeft:
-                    return new Color(0.76f, 0.9f, 0.44f);
+                    // 左上阵营棋子颜色：青绿色。
+                    return new Color(0.58f, 0.73f, 0.68f);
                 default:
+                    // 兜底颜色，一般不会显示。
                     return Color.white;
             }
         }
@@ -446,11 +453,11 @@ namespace SweetJumpJump
         private static readonly SlotId[] PreferredTurnOrder =
         {
             SlotId.Bottom,
+            SlotId.BottomLeft,
+            SlotId.TopLeft,
             SlotId.Top,
             SlotId.TopRight,
-            SlotId.BottomLeft,
-            SlotId.BottomRight,
-            SlotId.TopLeft
+            SlotId.BottomRight
         };
 
         private readonly Dictionary<int, PieceState> piecesById = new Dictionary<int, PieceState>();
@@ -459,6 +466,7 @@ namespace SweetJumpJump
         private readonly List<HexCoord> legalTargets = new List<HexCoord>();
         private readonly HashSet<HexCoord> visitedJumpCells = new HashSet<HexCoord>();
         private readonly List<TurnStep> currentTurnSteps = new List<TurnStep>();
+        private readonly HashSet<SlotId> completedSlots = new HashSet<SlotId>();
         private int selectedPieceId = -1;
         private int currentPlayerIndex;
         private MoveMode moveMode;
@@ -578,7 +586,7 @@ namespace SweetJumpJump
             }
 
             List<HexCoord> nextTargets = moveMode == MoveMode.JumpChain
-                ? GetJumpTargets(piece.Position, visitedJumpCells)
+                ? GetJumpTargets(piece.Position, null)
                 : moveMode == MoveMode.AdjacentDone
                     ? new List<HexCoord>()
                 : GetOpeningTargets(piece.Position);
@@ -647,7 +655,7 @@ namespace SweetJumpJump
 
             visitedJumpCells.Add(target);
             legalTargets.Clear();
-            legalTargets.AddRange(GetJumpTargets(target, visitedJumpCells));
+            legalTargets.AddRange(GetJumpTargets(target, null));
 
             if (legalTargets.Count > 0)
             {
@@ -705,7 +713,7 @@ namespace SweetJumpJump
                         visitedJumpCells.Add(currentTurnSteps[i].To);
                     }
 
-                    legalTargets.AddRange(GetJumpTargets(piece.Position, visitedJumpCells));
+                    legalTargets.AddRange(GetJumpTargets(piece.Position, null));
                     StatusMessage = legalTargets.Count > 0
                         ? "已撤回上一步，可以继续跳跃或完成移动。"
                         : "已撤回上一步，可以完成移动。";
@@ -803,6 +811,40 @@ namespace SweetJumpJump
             HasMovedThisTurn = true;
             StatusMessage = string.Format("{0} 完成了 {1}。", CurrentPlayerLabel, move.IsJump ? "跳跃行动" : "相邻移动");
             FinishTurnInternal();
+        }
+
+        public HexCoord ApplyAiMoveStep(MoveOption move, int pathIndex)
+        {
+            if (move == null)
+            {
+                StatusMessage = "AI 没有合法行动，自动放弃移动。";
+                FinishTurnInternal(false);
+                return default(HexCoord);
+            }
+
+            if (pathIndex < 0 || pathIndex >= move.Path.Count)
+            {
+                throw new ArgumentOutOfRangeException("pathIndex");
+            }
+
+            PieceState piece = piecesById[move.PieceId];
+            piecesByCoord.Remove(piece.Position);
+            piece.Position = move.Path[pathIndex];
+            piecesByCoord[piece.Position] = piece;
+            piecesById[piece.PieceId] = piece;
+            HasMovedThisTurn = true;
+
+            bool isLastStep = pathIndex == move.Path.Count - 1;
+            StatusMessage = isLastStep
+                ? string.Format("{0} 完成了 {1}。", CurrentPlayerLabel, move.IsJump ? "跳跃行动" : "相邻移动")
+                : string.Format("{0} 正在连续跳跃。", CurrentPlayerLabel);
+
+            if (isLastStep)
+            {
+                FinishTurnInternal();
+            }
+
+            return piece.Position;
         }
 
         private void BuildPlayers(RoomConfig roomConfig)
@@ -1051,14 +1093,13 @@ namespace SweetJumpJump
         private void FinishTurnInternal(bool checkWin = true)
         {
             SlotId previousSlot = CurrentPlayerSlot;
+            string completionMessage = string.Empty;
 
-            if (checkWin && HasPlayerWon(previousSlot))
+            if (checkWin && !completedSlots.Contains(previousSlot) && HasPlayerWon(previousSlot))
             {
-                IsGameOver = true;
-                WinnerLabel = string.Format("{0} 获胜", BoardLayout.GetSlotLabel(previousSlot));
-                legalTargets.Clear();
-                selectedPieceId = -1;
-                return;
+                completedSlots.Add(previousSlot);
+                WinnerLabel = string.Format("{0} 已完成", BoardLayout.GetSlotLabel(previousSlot));
+                completionMessage = string.Format("{0} 的棋子已经全部到达目标营地。", BoardLayout.GetSlotLabel(previousSlot));
             }
 
             selectedPieceId = -1;
@@ -1068,8 +1109,31 @@ namespace SweetJumpJump
             moveMode = MoveMode.None;
             HasMovedThisTurn = false;
 
-            currentPlayerIndex = (currentPlayerIndex + 1) % players.Count;
-            StatusMessage = string.Format("轮到 {0}。", CurrentPlayerLabel);
+            if (completedSlots.Count >= players.Count)
+            {
+                IsGameOver = true;
+                StatusMessage = string.IsNullOrEmpty(completionMessage)
+                    ? "所有玩家都已完成。"
+                    : completionMessage + "\n所有玩家都已完成。";
+                return;
+            }
+
+            AdvanceToNextUnfinishedPlayer();
+            StatusMessage = string.IsNullOrEmpty(completionMessage)
+                ? string.Format("轮到 {0}。", CurrentPlayerLabel)
+                : completionMessage + "\n轮到 " + CurrentPlayerLabel + "。";
+        }
+
+        private void AdvanceToNextUnfinishedPlayer()
+        {
+            for (int i = 0; i < players.Count; i++)
+            {
+                currentPlayerIndex = (currentPlayerIndex + 1) % players.Count;
+                if (!completedSlots.Contains(CurrentPlayerSlot))
+                {
+                    return;
+                }
+            }
         }
 
         private bool HasPlayerWon(SlotId slotId)
