@@ -11,6 +11,7 @@
 
 # Unity generated files
 *.csproj
+!/Server/*.csproj
 *.sln
 *.suo
 *.tmp
@@ -47,3 +48,7 @@ DerivedData/
 # Local/editor caches
 .idea/
 .vscode/
+
+# Local server build output
+/Server/bin/
+/Server/obj/

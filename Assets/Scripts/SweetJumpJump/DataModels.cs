@@ -137,12 +137,15 @@ namespace SweetJumpJump
         public bool SoundEnabled = true;
         public bool MusicEnabled = true;
         public string ThemeId = "pink";
+        public string CustomMusicPath = string.Empty;
+        public string OnlinePlayerToken = string.Empty;
+        public string OnlinePlayerName = string.Empty;
     }
 
     [Serializable]
     public sealed class AppSaveData
     {
-        public int SaveVersion = 3;
+        public int SaveVersion = 4;
         public bool Initialized;
         public GameOptions Options = new GameOptions();
         public List<RoomConfig> Rooms = new List<RoomConfig>();

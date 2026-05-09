@@ -3,8 +3,11 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using TMPro;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.Networking;
+using UnityEngine.TextCore.LowLevel;
 using UnityEngine.UI;
 
 namespace SweetJumpJump
@@ -52,15 +55,17 @@ namespace SweetJumpJump
             public int MaxFontSize;
             public int MinFontSize;
             public float HorizontalPadding;
+            public float VerticalPadding;
         }
 
         private sealed class ButtonLabelFitter : MonoBehaviour
         {
-            public Text Label;
+            public TMP_Text Label;
             public ButtonLabelLength Length;
 
             private string lastText;
             private Vector2 lastSize;
+            private Vector2 lastParentSize;
 
             public void ApplyNow()
             {
@@ -72,6 +77,8 @@ namespace SweetJumpJump
                 ApplyButtonLabelStyle(Label, Label.text, Length);
                 lastText = Label.text;
                 lastSize = Label.rectTransform.rect.size;
+                RectTransform parentRect = Label.rectTransform.parent as RectTransform;
+                lastParentSize = parentRect == null ? Vector2.zero : parentRect.rect.size;
             }
 
             private void LateUpdate()
@@ -82,7 +89,9 @@ namespace SweetJumpJump
                 }
 
                 Vector2 size = Label.rectTransform.rect.size;
-                if (lastText != Label.text || lastSize != size)
+                RectTransform parentRect = Label.rectTransform.parent as RectTransform;
+                Vector2 parentSize = parentRect == null ? Vector2.zero : parentRect.rect.size;
+                if (lastText != Label.text || lastSize != size || lastParentSize != parentSize)
                 {
                     ApplyNow();
                 }
@@ -103,6 +112,19 @@ namespace SweetJumpJump
         private const float BoardBasePieceSize = 94f;
         // 选中棋子局部高光层基准直径。
         private const float BoardBaseSelectionSize = 82f;
+        private static readonly Vector2 PrimaryMenuButtonSize = new Vector2(620f, 116f);
+        private static readonly Vector2 FullWidthButtonSize = new Vector2(620f, 82f);
+        private static readonly Vector2 OptionButtonSize = new Vector2(620f, 78f);
+        private static readonly Vector2 OptionHalfButtonSize = new Vector2(300f, 78f);
+        private static readonly Vector2 OptionFileButtonSize = new Vector2(380f, 78f);
+        private static readonly Vector2 RoomEditLargeButtonSize = new Vector2(430f, 72f);
+        private static readonly Vector2 RoomEditCompactButtonSize = new Vector2(286f, 66f);
+        private static readonly Vector2 RoomEditActionButtonSize = new Vector2(430f, 82f);
+        private static readonly Vector2 GameActionButtonSize = new Vector2(360f, 82f);
+        private const string CommonUiCharacterSet =
+            "甜姐的跳跳棋农夫山泉有点第一比赛第二开始游戏在线玩游戏选项默认规则一子跳空跳背景主题粉色糖果薄荷花园音效开关音乐催促间隔秒从文件选择恢复返回主菜单房间列表阶段只提供默房但已经支持本地保存和入口新建编辑名称保存取消人局上方右上右下下方左下左上真人玩家人机高级普通初级房密服务器连接断开创建加入准备取消准备开始本局人机设置发现暂时没有可加入申请同意拒绝完成悔棋移动放弃退出确认继续胜利当前进度不会保留请输入你的昵称输入密钥MP0123456789jumpmddxztopmobileiPad";
+        private const string LargeUiCharacterSet =
+            "甜姐的跳跳棋在线房间房间列表游戏选项编辑房间人机设置加入申请退出本局胜利";
 
         // BoardCellColor：普通六边形格子的填充色和边框整体色调，保持接近冰蓝棋盘。
         private static readonly Color BoardCellColor = new Color(0.86f, 0.93f, 0.98f, 0.86f);
@@ -125,6 +147,7 @@ namespace SweetJumpJump
         private static Sprite cachedPieceSprite;
         private static Sprite cachedPieceHighlightSprite;
         private static Sprite cachedMountainSprite;
+        private const string BundledChineseFontResource = "Fonts/NotoSansSC-Regular";
 
         private readonly Dictionary<HexCoord, BoardCellView> cellViews = new Dictionary<HexCoord, BoardCellView>();
         private readonly Dictionary<string, AudioClip> sfxClips = new Dictionary<string, AudioClip>();
@@ -134,7 +157,7 @@ namespace SweetJumpJump
         private RoomConfig selectedRoom;
         private GameSession session;
         private Canvas rootCanvas;
-        private Font defaultFont;
+        private TMP_FontAsset defaultFont;
         private AudioSource sfxSource;
         private AudioSource musicSource;
         private AudioClip musicClip;
@@ -144,19 +167,30 @@ namespace SweetJumpJump
         private RectTransform optionsPanel;
         private RectTransform roomsPanel;
         private RectTransform roomEditPanel;
+        private RectTransform onlinePanel;
         private RectTransform gamePanel;
         private RectTransform roomCardContainer;
         private RectTransform boardContainer;
         private RectTransform bottomControlBar;
+        private RectTransform onlineDiscoveryListContainer;
         private GameObject victoryModal;
+        private GameObject exitConfirmModal;
+        private GameObject onlineJoinRoomConfirmModal;
+        private GameObject onlineJoinRequestModal;
+        private GameObject onlineAiSettingsModal;
 
-        private Text splashTitleText;
-        private Text statusText;
-        private Text roomTitleText;
-        private Text victoryText;
-        private Text optionsSummaryText;
-        private Text roomEditTitleText;
-        private Text roomEditValidationText;
+        private TMP_Text splashTitleText;
+        private TMP_Text statusText;
+        private TMP_Text roomTitleText;
+        private TMP_Text victoryText;
+        private TMP_Text optionsSummaryText;
+        private TMP_Text roomEditTitleText;
+        private TMP_Text roomEditValidationText;
+        private TMP_Text onlineStatusText;
+        private TMP_Text onlineRoomKeyText;
+        private TMP_Text onlineDiscoveryText;
+        private TMP_Text onlineJoinRoomConfirmText;
+        private TMP_Text onlineJoinRequestText;
         private Image currentPlayerPieceImage;
 
         private Button finishTurnButton;
@@ -175,14 +209,43 @@ namespace SweetJumpJump
         private Button roomMusicToggleButton;
         private Button roomPromptToggleButton;
         private Button roomPromptIntervalButton;
-        private InputField roomNameInput;
+        private Button onlineReadyButton;
+        private Button onlineStartButton;
+        private Button onlineAiSettingsButton;
+        private TMP_InputField roomNameInput;
+        private TMP_InputField onlineRoomKeyInput;
+        private TMP_InputField onlinePlayerNameInput;
+        private Button musicPickButton;
+        private Button musicResetButton;
+        private TMP_Text musicImportStatusText;
         private readonly Dictionary<SlotId, Button> roomSlotButtons = new Dictionary<SlotId, Button>();
+        private readonly Dictionary<SlotId, Button> onlineAiSlotButtons = new Dictionary<SlotId, Button>();
+        private readonly List<Button> onlineDiscoveredRoomButtons = new List<Button>();
+        private readonly List<string> onlineDiscoveredRoomKeys = new List<string>();
+        private readonly HashSet<SlotId> onlineAiSlots = new HashSet<SlotId>();
         private RoomConfig editingRoomDraft;
         private string editingRoomOriginalId;
         private string pendingDeleteRoomId;
+        private OnlineClient onlineClient;
+        private bool onlineMode;
+        private bool onlineReady;
+        private bool onlineIsHost;
+        private SlotId onlineSlot;
+        private string onlineRoomKey = string.Empty;
+        private string onlineClientId = string.Empty;
+        private string onlineLobbySummary = string.Empty;
+        private string onlineDiscoveredRoomKey = string.Empty;
+        private string onlineDiscoverySummary = string.Empty;
+        private string onlineJoinConfirmRoomKey = string.Empty;
+        private string onlinePendingJoinClientId = string.Empty;
+        private string onlinePendingJoinPlayerName = string.Empty;
+        private int onlineHighlightedPieceId = -1;
+        private int onlineLastActionSeq;
+        private float onlineReconnectDelaySeconds;
         private float promptElapsedSeconds;
         private bool promptShown;
         private bool victorySoundPlayed;
+        private bool refreshingUiText;
         private Vector2 lastBoardContainerSize;
         private ThemePalette activeTheme;
 
@@ -214,6 +277,10 @@ namespace SweetJumpJump
             EnsureSceneScaffold();
             SetupAudio();
             saveData = SaveManager.Load();
+            if (saveData.Options != null && !string.IsNullOrWhiteSpace(saveData.Options.CustomMusicPath))
+            {
+                StartCoroutine(LoadCustomMusic(saveData.Options.CustomMusicPath, false));
+            }
             EnsureDefaultRoom();
             BuildUi();
             ApplyTheme(saveData.Options.ThemeId);
@@ -221,8 +288,27 @@ namespace SweetJumpJump
             StartCoroutine(ShowSplashThenMenu());
         }
 
+        private void OnDestroy()
+        {
+            DisconnectOnline();
+        }
+
+        private void OnEnable()
+        {
+        }
+
+        private void OnDisable()
+        {
+        }
+
         private void Update()
         {
+            PumpOnlineMessages();
+            if (onlineClient != null)
+            {
+                onlineClient.UpdateRetries();
+            }
+            UpdateOnlineReconnect();
             UpdateBoardLayoutIfNeeded();
             UpdateSelectionPulse();
             RefreshMusicState();
@@ -290,8 +376,32 @@ namespace SweetJumpJump
             musicSource.clip = musicClip;
         }
 
-        private Font GetDefaultFont()
+        private TMP_FontAsset GetDefaultFont()
         {
+            TMP_FontAsset fallbackFont = TMP_Settings.defaultFontAsset;
+            TMP_FontAsset bundledChineseFont = CreateTmpFontAsset(
+                Resources.Load<Font>(BundledChineseFontResource),
+                "SweetJumpJumpBundledChineseTMP",
+                fallbackFont);
+            if (bundledChineseFont != null)
+            {
+                return bundledChineseFont;
+            }
+
+#if UNITY_IOS && !UNITY_EDITOR
+            string[] preferredFonts =
+            {
+                "PingFangSC-Regular",
+                "PingFang SC",
+                "PingFangSC-Semibold",
+                "STHeitiSC-Light",
+                "STHeitiSC-Medium",
+                "Heiti SC",
+                "Hiragino Sans GB",
+                "Arial Unicode MS",
+                "Arial"
+            };
+#else
             string[] preferredFonts =
             {
                 "PingFang SC",
@@ -302,9 +412,57 @@ namespace SweetJumpJump
                 "Arial Unicode MS",
                 "Arial"
             };
+#endif
 
-            Font font = Font.CreateDynamicFontFromOSFont(preferredFonts, 32);
-            return font != null ? font : Resources.GetBuiltinResource<Font>("Arial.ttf");
+            try
+            {
+                Font font = Font.CreateDynamicFontFromOSFont(preferredFonts, 32);
+                if (font == null)
+                {
+                    font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+                }
+
+                TMP_FontAsset fontAsset = CreateTmpFontAsset(font, "SweetJumpJumpDynamicChineseTMP", fallbackFont);
+                if (fontAsset != null)
+                {
+                    return fontAsset;
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("TMP dynamic Chinese font setup failed. Falling back to TMP default font. " + exception.Message);
+            }
+
+            if (fallbackFont != null)
+            {
+                return fallbackFont;
+            }
+
+            return Resources.Load<TMP_FontAsset>("Fonts & Materials/LiberationSans SDF");
+        }
+
+        private static TMP_FontAsset CreateTmpFontAsset(Font font, string assetName, TMP_FontAsset fallbackFont)
+        {
+            if (font == null)
+            {
+                return null;
+            }
+
+            TMP_FontAsset fontAsset = TMP_FontAsset.CreateFontAsset(font, 90, 9, GlyphRenderMode.SDFAA, 2048, 2048, AtlasPopulationMode.Dynamic, true);
+            if (fontAsset == null)
+            {
+                return null;
+            }
+
+            fontAsset.name = assetName;
+            fontAsset.atlasPopulationMode = AtlasPopulationMode.Dynamic;
+            fontAsset.isMultiAtlasTexturesEnabled = true;
+            if (fallbackFont != null && fallbackFont != fontAsset)
+            {
+                fontAsset.fallbackFontAssetTable = new List<TMP_FontAsset> { fallbackFont };
+            }
+
+            return fontAsset;
         }
 
         private void BuildUi()
@@ -327,6 +485,7 @@ namespace SweetJumpJump
             optionsPanel = CreateFullscreenPanel("OptionsPanel", canvasObject.transform, new Color(1f, 0.94f, 0.96f, 0.95f));
             roomsPanel = CreateFullscreenPanel("RoomsPanel", canvasObject.transform, new Color(1f, 0.95f, 0.98f, 0.96f));
             roomEditPanel = CreateFullscreenPanel("RoomEditPanel", canvasObject.transform, new Color(1f, 0.95f, 0.98f, 0.97f));
+            onlinePanel = CreateFullscreenPanel("OnlinePanel", canvasObject.transform, new Color(1f, 0.95f, 0.98f, 0.97f));
             gamePanel = CreateFullscreenPanel("GamePanel", canvasObject.transform, new Color(1f, 0.96f, 0.98f, 0.98f));
 
             BuildSplashPanel();
@@ -334,9 +493,11 @@ namespace SweetJumpJump
             BuildOptionsPanel();
             BuildRoomsPanel();
             BuildRoomEditPanel();
+            BuildOnlinePanel();
             BuildGamePanel();
 
             ShowPanel(splashPanel);
+            RefreshAllUiText();
         }
 
         private IEnumerator ShowSplashThenMenu()
@@ -361,9 +522,18 @@ namespace SweetJumpJump
 
         private void ShowRooms()
         {
+            onlineMode = false;
             ApplyTheme(saveData.Options.ThemeId);
             RefreshRoomCards();
             ShowPanel(roomsPanel);
+        }
+
+        private void ShowOnline()
+        {
+            ApplyTheme(saveData.Options.ThemeId);
+            RefreshOnlineLobby("连接服务器后，可以创建房间或输入密钥加入。");
+            ShowPanel(onlinePanel);
+            ConnectOnlineIfNeeded();
         }
 
         private void ShowRoomEditor(RoomConfig roomConfig)
@@ -379,6 +549,7 @@ namespace SweetJumpJump
 
         private void StartRoom(RoomConfig roomConfig)
         {
+            onlineMode = false;
             selectedRoom = roomConfig;
             session = new GameSession(roomConfig);
             ResetPromptTimer();
@@ -388,8 +559,46 @@ namespace SweetJumpJump
             EnsureBoardCreated();
             RefreshBoard();
             victoryModal.SetActive(false);
+            if (exitConfirmModal != null)
+            {
+                exitConfirmModal.SetActive(false);
+            }
             ShowPanel(gamePanel);
             StartCoroutine(RunAiTurnIfNeeded());
+        }
+
+        private void HandleExitCurrentGame()
+        {
+            ShowExitConfirm();
+        }
+
+        private void ShowExitConfirm()
+        {
+            if (exitConfirmModal != null)
+            {
+                exitConfirmModal.SetActive(true);
+            }
+        }
+
+        private void HideExitConfirm()
+        {
+            if (exitConfirmModal != null)
+            {
+                exitConfirmModal.SetActive(false);
+            }
+        }
+
+        private void ConfirmExitCurrentGame()
+        {
+            if (onlineMode)
+            {
+                DisconnectOnline();
+            }
+
+            HideExitConfirm();
+            session = null;
+            selectedRoom = null;
+            ShowRooms();
         }
 
         private IEnumerator RunAiTurnIfNeeded()
@@ -442,7 +651,7 @@ namespace SweetJumpJump
                 BoardCellView view = entry.Value;
                 PieceState piece = session.GetPieceAt(view.Coord);
                 bool isTarget = legalTargets.Contains(view.Coord);
-                bool isSelected = piece != null && piece.PieceId == session.SelectedPieceId;
+                bool isSelected = piece != null && (piece.PieceId == session.SelectedPieceId || piece.PieceId == onlineHighlightedPieceId);
 
                 view.BaseImage.color = isTarget
                     ? BoardTargetColor
@@ -489,9 +698,10 @@ namespace SweetJumpJump
             bool showPassButton = session.CanPass && !session.CanFinishTurn;
             finishTurnButton.gameObject.SetActive(!showPassButton);
             passTurnButton.gameObject.SetActive(showPassButton);
-            finishTurnButton.interactable = session.CanFinishTurn;
-            passTurnButton.interactable = session.CanPass;
-            undoButton.interactable = session.CanUndo;
+            bool onlineMyTurn = !onlineMode || IsOnlineMyTurn();
+            finishTurnButton.interactable = session.CanFinishTurn && onlineMyTurn;
+            passTurnButton.interactable = session.CanPass && onlineMyTurn;
+            undoButton.interactable = session.CanUndo && !onlineMode;
             RefreshGameChromeStyle();
 
             if (session.IsGameOver)
@@ -527,6 +737,7 @@ namespace SweetJumpJump
             {
                 victoryModal.SetActive(false);
             }
+            HideExitConfirm();
 
             if (statusText != null && session != null && !string.IsNullOrEmpty(session.StatusMessage))
             {
@@ -536,6 +747,7 @@ namespace SweetJumpJump
             finishTurnButton.interactable = false;
             passTurnButton.interactable = false;
             undoButton.interactable = false;
+            RefreshMusicState();
             if (!victorySoundPlayed && session != null && session.IsGameOver)
             {
                 victorySoundPlayed = true;
@@ -550,10 +762,30 @@ namespace SweetJumpJump
                 return;
             }
 
+            if (onlineMode && !IsOnlineMyTurn())
+            {
+                statusText.text = "还没轮到你。";
+                PlaySfx("invalid");
+                return;
+            }
+
             string message;
 
             if (session.LegalTargets.Contains(coord))
             {
+                if (onlineMode)
+                {
+                    onlineClient.SendReliable(new OnlineMessage
+                    {
+                        type = "MOVE",
+                        roomKey = onlineRoomKey,
+                        pieceId = session.SelectedPieceId,
+                        q = coord.Q,
+                        r = coord.R
+                    });
+                    return;
+                }
+
                 if (session.TryMoveSelectedPiece(coord, out message))
                 {
                     ResetPromptTimer();
@@ -561,6 +793,29 @@ namespace SweetJumpJump
                     RefreshBoard();
                     StartCoroutine(AnimatePiecePulse(coord, 1.18f, 0.18f));
                     StartCoroutine(RunAiTurnIfNeeded());
+                    return;
+                }
+            }
+            else if (onlineMode)
+            {
+                PieceState piece = session.GetPieceAt(coord);
+                bool selected = session.TrySelectPiece(coord, out message);
+                onlineClient.SendReliable(new OnlineMessage
+                {
+                    type = "SELECT",
+                    roomKey = onlineRoomKey,
+                    pieceId = piece == null ? -1 : piece.PieceId,
+                    q = coord.Q,
+                    r = coord.R,
+                    ok = selected,
+                    message = message
+                });
+
+                if (selected)
+                {
+                    ResetPromptTimer();
+                    PlaySfx("select");
+                    RefreshBoard();
                     return;
                 }
             }
@@ -580,6 +835,15 @@ namespace SweetJumpJump
         {
             if (session == null)
             {
+                return;
+            }
+
+            if (onlineMode)
+            {
+                if (IsOnlineMyTurn() && session.CanFinishTurn)
+                {
+                    onlineClient.SendReliable(new OnlineMessage { type = "FINISH", roomKey = onlineRoomKey });
+                }
                 return;
             }
 
@@ -605,6 +869,15 @@ namespace SweetJumpJump
                 return;
             }
 
+            if (onlineMode)
+            {
+                if (IsOnlineMyTurn() && session.CanPass)
+                {
+                    onlineClient.SendReliable(new OnlineMessage { type = "PASS", roomKey = onlineRoomKey });
+                }
+                return;
+            }
+
             string message;
             if (session.TryPassTurn(out message))
             {
@@ -627,6 +900,13 @@ namespace SweetJumpJump
                 return;
             }
 
+            if (onlineMode)
+            {
+                statusText.text = "在线模式暂不支持悔棋。";
+                PlaySfx("invalid");
+                return;
+            }
+
             string message;
             if (session.TryUndo(out message))
             {
@@ -645,6 +925,731 @@ namespace SweetJumpJump
         {
             promptElapsedSeconds = 0f;
             promptShown = false;
+        }
+
+        private void CreateOnlineRoom()
+        {
+            ConnectOnlineIfNeeded();
+            if (onlineClient != null && onlineClient.IsConnected)
+            {
+                onlineClient.SendReliable(new OnlineMessage { type = "CREATE", playerName = GetOnlinePlayerName(), playerToken = GetOnlinePlayerToken() });
+                RefreshOnlineLobby("正在创建房间...");
+            }
+        }
+
+        private void JoinOnlineRoom()
+        {
+            string key = onlineRoomKeyInput.text == null ? string.Empty : onlineRoomKeyInput.text.Trim().ToUpperInvariant();
+            if (string.IsNullOrEmpty(key))
+            {
+                RefreshOnlineLobby("请输入房间密钥。");
+                return;
+            }
+
+            ConnectOnlineIfNeeded();
+            if (onlineClient != null && onlineClient.IsConnected)
+            {
+                ShowOnlineJoinRoomConfirm(key);
+            }
+        }
+
+        private void JoinDiscoveredOnlineRoom()
+        {
+            if (string.IsNullOrEmpty(onlineDiscoveredRoomKey))
+            {
+                RefreshOnlineLobby("还没有发现可加入的房间。");
+                return;
+            }
+
+            ConnectOnlineIfNeeded();
+            if (onlineClient != null && onlineClient.IsConnected)
+            {
+                ShowOnlineJoinRoomConfirm(onlineDiscoveredRoomKey);
+            }
+        }
+
+        private void RequestJoinDiscoveredRoom(string roomKey)
+        {
+            if (string.IsNullOrEmpty(roomKey))
+            {
+                return;
+            }
+
+            onlineDiscoveredRoomKey = roomKey;
+            JoinDiscoveredOnlineRoom();
+        }
+
+        private void ShowOnlineJoinRoomConfirm(string roomKey)
+        {
+            onlineJoinConfirmRoomKey = roomKey;
+            if (onlineJoinRoomConfirmText != null)
+            {
+                onlineJoinRoomConfirmText.text = "申请加入房间 " + roomKey + "？";
+            }
+
+            if (onlineJoinRoomConfirmModal != null)
+            {
+                onlineJoinRoomConfirmModal.SetActive(true);
+            }
+        }
+
+        private void HideOnlineJoinRoomConfirm()
+        {
+            if (onlineJoinRoomConfirmModal != null)
+            {
+                onlineJoinRoomConfirmModal.SetActive(false);
+            }
+        }
+
+        private void ConfirmOnlineJoinRoom()
+        {
+            if (string.IsNullOrEmpty(onlineJoinConfirmRoomKey) || onlineClient == null || !onlineClient.IsConnected)
+            {
+                HideOnlineJoinRoomConfirm();
+                return;
+            }
+
+            onlineClient.SendReliable(new OnlineMessage { type = "JOIN_REQUEST", roomKey = onlineJoinConfirmRoomKey, playerName = GetOnlinePlayerName(), playerToken = GetOnlinePlayerToken() });
+            RefreshOnlineLobby("正在申请加入房间 " + onlineJoinConfirmRoomKey + "...");
+            HideOnlineJoinRoomConfirm();
+            onlineJoinConfirmRoomKey = string.Empty;
+        }
+
+        private void ApprovePendingOnlineJoin()
+        {
+            if (!onlineIsHost || string.IsNullOrEmpty(onlinePendingJoinClientId) || onlineClient == null || !onlineClient.IsConnected)
+            {
+                return;
+            }
+
+            onlineClient.SendReliable(new OnlineMessage
+            {
+                type = "JOIN_APPROVE",
+                roomKey = onlineRoomKey,
+                requestClientId = onlinePendingJoinClientId
+            });
+            RefreshOnlineLobby("已同意 " + onlinePendingJoinPlayerName + " 加入。");
+            onlinePendingJoinClientId = string.Empty;
+            onlinePendingJoinPlayerName = string.Empty;
+            HideOnlineJoinRequest();
+            RefreshOnlineLobby(string.Empty);
+        }
+
+        private void RejectPendingOnlineJoin()
+        {
+            if (!onlineIsHost || string.IsNullOrEmpty(onlinePendingJoinClientId) || onlineClient == null || !onlineClient.IsConnected)
+            {
+                HideOnlineJoinRequest();
+                return;
+            }
+
+            onlineClient.SendReliable(new OnlineMessage
+            {
+                type = "JOIN_REJECT",
+                roomKey = onlineRoomKey,
+                requestClientId = onlinePendingJoinClientId
+            });
+            RefreshOnlineLobby("已拒绝 " + onlinePendingJoinPlayerName + " 加入。");
+            onlinePendingJoinClientId = string.Empty;
+            onlinePendingJoinPlayerName = string.Empty;
+            HideOnlineJoinRequest();
+            RefreshOnlineLobby(string.Empty);
+        }
+
+        private void ShowOnlineJoinRequest()
+        {
+            if (onlineJoinRequestText != null)
+            {
+                onlineJoinRequestText.text = onlinePendingJoinPlayerName + " 想加入房间。";
+            }
+
+            if (onlineJoinRequestModal != null)
+            {
+                onlineJoinRequestModal.SetActive(true);
+            }
+        }
+
+        private void HideOnlineJoinRequest()
+        {
+            if (onlineJoinRequestModal != null)
+            {
+                onlineJoinRequestModal.SetActive(false);
+            }
+        }
+
+        private void ShowOnlineAiSettings()
+        {
+            if (onlineAiSettingsModal != null)
+            {
+                onlineAiSettingsModal.SetActive(true);
+                RefreshOnlineAiButtons();
+            }
+        }
+
+        private void HideOnlineAiSettings()
+        {
+            if (onlineAiSettingsModal != null)
+            {
+                onlineAiSettingsModal.SetActive(false);
+            }
+        }
+
+        private void ToggleOnlineReady()
+        {
+            if (onlineClient == null || !onlineClient.IsConnected || string.IsNullOrEmpty(onlineRoomKey))
+            {
+                RefreshOnlineLobby("请先创建或加入房间。");
+                return;
+            }
+
+            onlineReady = !onlineReady;
+            onlineClient.SendReliable(new OnlineMessage { type = "READY", roomKey = onlineRoomKey, ok = onlineReady });
+            RefreshOnlineLobby(onlineReady ? "已准备，等待房主开始。" : "已取消准备。");
+        }
+
+        private void StartOnlineGame()
+        {
+            if (onlineClient == null || !onlineClient.IsConnected || string.IsNullOrEmpty(onlineRoomKey))
+            {
+                RefreshOnlineLobby("请先创建房间。");
+                return;
+            }
+
+            onlineClient.SendReliable(new OnlineMessage { type = "START", roomKey = onlineRoomKey });
+        }
+
+        private void ToggleOnlineAiSlot(SlotId slotId)
+        {
+            if (!onlineIsHost || onlineClient == null || !onlineClient.IsConnected || string.IsNullOrEmpty(onlineRoomKey))
+            {
+                return;
+            }
+
+            bool next = !onlineAiSlots.Contains(slotId);
+            onlineClient.SendReliable(new OnlineMessage
+            {
+                type = "SET_AI",
+                roomKey = onlineRoomKey,
+                slot = slotId.ToString(),
+                ok = next
+            });
+        }
+
+        private void ConnectOnlineIfNeeded()
+        {
+            if (onlineClient != null && onlineClient.IsConnected)
+            {
+                return;
+            }
+
+            try
+            {
+                onlineClient = new OnlineClient();
+                onlineClient.Connect("jump.mddxz.top", 53333);
+                onlineReconnectDelaySeconds = 0f;
+            }
+            catch (Exception exception)
+            {
+                RefreshOnlineLobby("连接服务器失败：" + exception.Message);
+            }
+        }
+
+        private void UpdateOnlineReconnect()
+        {
+            if (!onlineMode || string.IsNullOrEmpty(onlineRoomKey) || onlineClient != null)
+            {
+                return;
+            }
+
+            onlineReconnectDelaySeconds -= Time.deltaTime;
+            if (onlineReconnectDelaySeconds > 0f)
+            {
+                return;
+            }
+
+            onlineReconnectDelaySeconds = 3f;
+            ConnectOnlineIfNeeded();
+        }
+
+        private void PumpOnlineMessages()
+        {
+            if (onlineClient == null)
+            {
+                return;
+            }
+
+            OnlineMessage message;
+            while (onlineClient.TryDequeue(out message))
+            {
+                HandleOnlineMessage(message);
+            }
+        }
+
+        private void HandleOnlineMessage(OnlineMessage message)
+        {
+            if (message == null)
+            {
+                return;
+            }
+
+            if (message.type == "WELCOME")
+            {
+                onlineClientId = message.clientId;
+                onlineClient.Send(new OnlineMessage { type = "AUTH", playerToken = GetOnlinePlayerToken(), playerName = GetOnlinePlayerName() });
+                if (onlineMode && !string.IsNullOrEmpty(onlineRoomKey))
+                {
+                    onlineClient.SendReliable(new OnlineMessage
+                    {
+                        type = "REJOIN",
+                        roomKey = onlineRoomKey,
+                        playerToken = GetOnlinePlayerToken(),
+                        playerName = GetOnlinePlayerName(),
+                        lastActionSeq = onlineLastActionSeq
+                    });
+                    if (statusText != null && gamePanel != null && gamePanel.gameObject.activeSelf)
+                    {
+                        statusText.text = "正在重连...";
+                    }
+                }
+                return;
+            }
+
+            if (message.type == "ERROR" || message.type == "DISCONNECTED")
+            {
+                if (message.type == "DISCONNECTED" && onlineMode && !string.IsNullOrEmpty(onlineRoomKey))
+                {
+                    if (onlineClient != null)
+                    {
+                        onlineClient.Dispose();
+                        onlineClient = null;
+                    }
+                    onlineReconnectDelaySeconds = 0.5f;
+                }
+
+                if (statusText != null && gamePanel != null && gamePanel.gameObject.activeSelf)
+                {
+                    statusText.text = message.message;
+                }
+                else
+                {
+                    RefreshOnlineLobby(message.message);
+                }
+                return;
+            }
+
+            if (message.actionSeq > 0)
+            {
+                onlineLastActionSeq = Mathf.Max(onlineLastActionSeq, message.actionSeq);
+            }
+
+            if (message.type == "ROOM_CLEARED")
+            {
+                ClearOnlineRoomState();
+                RefreshOnlineLobby(message.message);
+                ShowPanel(onlinePanel);
+                return;
+            }
+
+            if (message.type == "DISCOVER")
+            {
+                onlineDiscoveredRoomKey = message.roomKey;
+                onlineDiscoverySummary = message.message;
+                UpdateOnlineDiscoveredRooms(message.slots);
+                RefreshOnlineLobby(string.Empty);
+                return;
+            }
+
+            if (message.type == "JOIN_PENDING")
+            {
+                RefreshOnlineLobby(message.message);
+                return;
+            }
+
+            if (message.type == "JOIN_REQUEST")
+            {
+                onlinePendingJoinClientId = message.requestClientId;
+                onlinePendingJoinPlayerName = string.IsNullOrWhiteSpace(message.requestPlayerName) ? "一位玩家" : message.requestPlayerName;
+                RefreshOnlineLobby(message.message);
+                ShowOnlineJoinRequest();
+                return;
+            }
+
+            if (message.type == "JOIN_REJECTED")
+            {
+                RefreshOnlineLobby(message.message);
+                return;
+            }
+
+            if (message.type == "ROOM")
+            {
+                onlineRoomKey = message.roomKey;
+                onlineClientId = string.IsNullOrEmpty(onlineClientId) ? message.clientId : onlineClientId;
+                onlineIsHost = message.hostId == onlineClientId;
+                TryParseSlot(message.slot, out onlineSlot);
+                onlineReady = false;
+                onlineLobbySummary = message.message;
+                onlineLastActionSeq = message.lastActionSeq;
+                onlinePendingJoinClientId = string.Empty;
+                onlinePendingJoinPlayerName = string.Empty;
+                UpdateOnlineAiSlots(message.aiSlots);
+                RefreshOnlineLobby("房间已就绪。");
+                return;
+            }
+
+            if (message.type == "LOBBY")
+            {
+                onlineIsHost = message.hostId == onlineClientId;
+                onlineLobbySummary = message.message;
+                UpdateOnlineAiSlots(message.aiSlots);
+                RefreshOnlineLobby(string.Empty);
+                return;
+            }
+
+            if (message.type == "START")
+            {
+                onlineLastActionSeq = 0;
+                StartOnlineSession(message);
+                return;
+            }
+
+            if (message.type == "MOVE")
+            {
+                ApplyOnlineMove(message);
+                return;
+            }
+
+            if (message.type == "SELECT")
+            {
+                ApplyOnlineSelect(message);
+                return;
+            }
+
+            if (message.type == "FINISH")
+            {
+                ApplyOnlineFinish();
+                return;
+            }
+
+            if (message.type == "PASS")
+            {
+                ApplyOnlinePass();
+                return;
+            }
+        }
+
+        private void StartOnlineSession(OnlineMessage message)
+        {
+            RoomConfig room = new RoomConfig
+            {
+                RoomId = "online-" + message.roomKey,
+                RoomName = "在线房间 " + message.roomKey,
+                RuleVariant = saveData.Options.DefaultRule,
+                SoundEnabled = saveData.Options.SoundEnabled,
+                MusicEnabled = saveData.Options.MusicEnabled,
+                PromptEnabled = false,
+                PromptIntervalSeconds = saveData.Options.PromptIntervalSeconds,
+                ThemeId = saveData.Options.ThemeId,
+                Slots = new List<SlotConfig>()
+            };
+
+            string[] slotNames = (message.slots ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < slotNames.Length; i++)
+            {
+                SlotId slotId;
+                if (TryParseSlot(slotNames[i], out slotId))
+                {
+                    room.Slots.Add(new SlotConfig { SlotId = slotId, PlayerKind = PlayerKind.Human });
+                }
+            }
+
+            string[] aiSlotNames = (message.aiSlots ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < aiSlotNames.Length; i++)
+            {
+                SlotId slotId;
+                if (TryParseSlot(aiSlotNames[i], out slotId) && !room.Slots.Any(slot => slot.SlotId == slotId))
+                {
+                    room.Slots.Add(new SlotConfig { SlotId = slotId, PlayerKind = PlayerKind.AiAdvanced });
+                }
+            }
+
+            if (room.Slots.Count < 2)
+            {
+                RefreshOnlineLobby("至少需要两位玩家或人机。");
+                return;
+            }
+
+            selectedRoom = room;
+            session = new GameSession(room);
+            onlineMode = true;
+            ResetPromptTimer();
+            victorySoundPlayed = false;
+            ApplyTheme(room.ThemeId);
+            roomTitleText.text = string.Format("{0} · 你是{1}", room.RoomName, BoardLayout.GetSlotLabel(onlineSlot));
+            EnsureBoardCreated();
+            UpdateBoardLayout(true);
+            RefreshBoard();
+            victoryModal.SetActive(false);
+            if (exitConfirmModal != null)
+            {
+                exitConfirmModal.SetActive(false);
+            }
+            ShowPanel(gamePanel);
+            StartCoroutine(RunAiTurnIfNeeded());
+        }
+
+        private void ApplyOnlineSelect(OnlineMessage message)
+        {
+            if (session == null || message.clientId == onlineClientId)
+            {
+                return;
+            }
+
+            if (message.ok && message.pieceId >= 0)
+            {
+                PieceState piece = session.GetPieceById(message.pieceId);
+                if (piece != null)
+                {
+                    string ignored;
+                    session.TrySelectPiece(piece.Position, out ignored);
+                    onlineHighlightedPieceId = message.pieceId;
+                }
+            }
+            else
+            {
+                onlineHighlightedPieceId = -1;
+                if (!string.IsNullOrEmpty(message.message))
+                {
+                    statusText.text = message.message;
+                }
+            }
+
+            RefreshBoard();
+        }
+
+        private void ApplyOnlineMove(OnlineMessage message)
+        {
+            if (session == null)
+            {
+                return;
+            }
+
+            string error;
+            HexCoord target = new HexCoord(message.q, message.r);
+            if (session.TryMovePieceById(message.pieceId, target, out error))
+            {
+                ResetPromptTimer();
+                RefreshBoard();
+                PlaySfx("move");
+                StartCoroutine(AnimatePiecePulse(target, 1.18f, 0.18f));
+            }
+            else
+            {
+                statusText.text = error;
+            }
+        }
+
+        private void ApplyOnlineFinish()
+        {
+            if (session == null)
+            {
+                return;
+            }
+
+            string error;
+            if (!session.TryFinishTurn(out error))
+            {
+                statusText.text = error;
+            }
+
+            ResetPromptTimer();
+            RefreshBoard();
+            StartCoroutine(RunAiTurnIfNeeded());
+        }
+
+        private void ApplyOnlinePass()
+        {
+            if (session == null)
+            {
+                return;
+            }
+
+            string error;
+            if (!session.TryPassTurn(out error))
+            {
+                statusText.text = error;
+            }
+
+            ResetPromptTimer();
+            RefreshBoard();
+            StartCoroutine(RunAiTurnIfNeeded());
+        }
+
+        private bool IsOnlineMyTurn()
+        {
+            return session != null && session.CurrentPlayerSlot == onlineSlot;
+        }
+
+        private void RefreshOnlineLobby(string message)
+        {
+            if (onlineRoomKeyText != null)
+            {
+                onlineRoomKeyText.text = string.IsNullOrEmpty(onlineRoomKey)
+                    ? "房间密钥：未创建"
+                    : "房间密钥：" + onlineRoomKey + "  颜色：" + BoardLayout.GetSlotLabel(onlineSlot);
+            }
+
+            if (onlineStatusText != null)
+            {
+                string hostLine = onlineIsHost ? "你是房主，可以在大家准备后开始。" : "等待房主开始。";
+                string joinLine = string.IsNullOrEmpty(onlinePendingJoinClientId)
+                    ? string.Empty
+                    : onlinePendingJoinPlayerName + " 申请加入。";
+                onlineStatusText.text = string.Format("{0}\n{1}\n{2}\n{3}", message, onlineLobbySummary, string.IsNullOrEmpty(onlineRoomKey) ? string.Empty : hostLine, joinLine);
+            }
+
+            if (onlineDiscoveryText != null)
+            {
+                onlineDiscoveryText.text = string.IsNullOrEmpty(onlineDiscoverySummary)
+                    ? "发现房间"
+                    : "发现房间";
+            }
+
+            RefreshOnlineDiscoveryList();
+
+            if (onlineReadyButton != null)
+            {
+                onlineReadyButton.interactable = !string.IsNullOrEmpty(onlineRoomKey);
+                SetButtonLabel(onlineReadyButton, onlineReady ? "取消准备" : "准备");
+            }
+
+            if (onlineStartButton != null)
+            {
+                onlineStartButton.interactable = onlineIsHost && !string.IsNullOrEmpty(onlineRoomKey);
+            }
+
+            if (onlineAiSettingsButton != null)
+            {
+                onlineAiSettingsButton.interactable = onlineIsHost && !string.IsNullOrEmpty(onlineRoomKey);
+            }
+
+            RefreshOnlineAiButtons();
+        }
+
+        private void UpdateOnlineDiscoveredRooms(string roomKeys)
+        {
+            onlineDiscoveredRoomKeys.Clear();
+            string[] values = (roomKeys ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < values.Length; i++)
+            {
+                string key = values[i].Trim();
+                if (!string.IsNullOrEmpty(key) && !onlineDiscoveredRoomKeys.Contains(key))
+                {
+                    onlineDiscoveredRoomKeys.Add(key);
+                }
+            }
+        }
+
+        private void RefreshOnlineDiscoveryList()
+        {
+            if (onlineDiscoveryListContainer == null)
+            {
+                return;
+            }
+
+            for (int i = onlineDiscoveryListContainer.childCount - 1; i >= 0; i--)
+            {
+                Destroy(onlineDiscoveryListContainer.GetChild(i).gameObject);
+            }
+            onlineDiscoveredRoomButtons.Clear();
+
+            if (!string.IsNullOrEmpty(onlineRoomKey))
+            {
+                TMP_Text joinedText = CreateText("DiscoveryJoined", onlineDiscoveryListContainer, "已在房间中。", 25, FontStyle.Normal, new Color(0.48f, 0.32f, 0.4f), TextAnchor.MiddleCenter, size: new Vector2(900f, 46f));
+                SetLayoutElement(joinedText, 46f);
+                return;
+            }
+
+            if (onlineDiscoveredRoomKeys.Count == 0)
+            {
+                TMP_Text emptyText = CreateText("DiscoveryEmpty", onlineDiscoveryListContainer, "暂时没有可加入的房间。", 25, FontStyle.Normal, new Color(0.48f, 0.32f, 0.4f), TextAnchor.MiddleCenter, size: new Vector2(900f, 46f));
+                SetLayoutElement(emptyText, 46f);
+                return;
+            }
+
+            for (int i = 0; i < onlineDiscoveredRoomKeys.Count; i++)
+            {
+                string roomKey = onlineDiscoveredRoomKeys[i];
+                Button button = CreateLayoutButton(onlineDiscoveryListContainer, "房间 " + roomKey + " · 申请加入", () => RequestJoinDiscoveredRoom(roomKey), ButtonLabelLength.SixCharacters);
+                onlineDiscoveredRoomButtons.Add(button);
+            }
+        }
+
+        private void UpdateOnlineAiSlots(string aiSlots)
+        {
+            onlineAiSlots.Clear();
+            string[] values = (aiSlots ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < values.Length; i++)
+            {
+                SlotId slotId;
+                if (TryParseSlot(values[i], out slotId))
+                {
+                    onlineAiSlots.Add(slotId);
+                }
+            }
+        }
+
+        private void RefreshOnlineAiButtons()
+        {
+            foreach (KeyValuePair<SlotId, Button> entry in onlineAiSlotButtons)
+            {
+                Button button = entry.Value;
+                if (button == null)
+                {
+                    continue;
+                }
+
+                bool enabled = onlineAiSlots.Contains(entry.Key);
+                SetButtonLabel(button, string.Format("{0}：{1}", BoardLayout.GetSlotLabel(entry.Key), enabled ? "高级AI" : "空位"));
+                button.interactable = onlineIsHost && !string.IsNullOrEmpty(onlineRoomKey) && entry.Key != onlineSlot;
+            }
+        }
+
+        private void DisconnectOnline()
+        {
+            if (onlineClient != null)
+            {
+                onlineClient.Dispose();
+                onlineClient = null;
+            }
+
+            ClearOnlineRoomState();
+            onlineClientId = string.Empty;
+        }
+
+        private void ClearOnlineRoomState()
+        {
+            onlineMode = false;
+            onlineReady = false;
+            onlineIsHost = false;
+            onlineRoomKey = string.Empty;
+            onlineLobbySummary = string.Empty;
+            onlineDiscoveredRoomKey = string.Empty;
+            onlineDiscoverySummary = string.Empty;
+            onlineJoinConfirmRoomKey = string.Empty;
+            onlinePendingJoinClientId = string.Empty;
+            onlinePendingJoinPlayerName = string.Empty;
+            onlineLastActionSeq = 0;
+            onlineReconnectDelaySeconds = 0f;
+            onlineDiscoveredRoomKeys.Clear();
+            onlineAiSlots.Clear();
+            HideOnlineJoinRoomConfirm();
+            HideOnlineJoinRequest();
+            HideOnlineAiSettings();
+        }
+
+        private static bool TryParseSlot(string value, out SlotId slotId)
+        {
+            return Enum.TryParse(value, true, out slotId);
         }
 
         private void EnsureDefaultRoom()
@@ -676,6 +1681,14 @@ namespace SweetJumpJump
                 saveData.SaveVersion = 3;
             }
 
+            if (saveData.SaveVersion < 4)
+            {
+                EnsureOnlineIdentity();
+                saveData.SaveVersion = 4;
+            }
+
+            EnsureOnlineIdentity();
+
             RoomConfig defaultRoom = saveData.Rooms.FirstOrDefault(room => room.RoomId == "default-room");
             if (defaultRoom == null)
             {
@@ -696,6 +1709,59 @@ namespace SweetJumpJump
             }
 
             SaveManager.Save(saveData);
+        }
+
+        private void EnsureOnlineIdentity()
+        {
+            if (saveData == null)
+            {
+                saveData = new AppSaveData();
+            }
+
+            if (saveData.Options == null)
+            {
+                saveData.Options = BoardLayout.CreateDefaultOptions();
+            }
+
+            if (string.IsNullOrWhiteSpace(saveData.Options.OnlinePlayerToken))
+            {
+                saveData.Options.OnlinePlayerToken = Guid.NewGuid().ToString("N");
+            }
+
+            if (string.IsNullOrWhiteSpace(saveData.Options.OnlinePlayerName))
+            {
+                saveData.Options.OnlinePlayerName = string.IsNullOrWhiteSpace(Environment.UserName) ? "玩家" : Environment.UserName;
+            }
+        }
+
+        private string GetOnlinePlayerToken()
+        {
+            EnsureOnlineIdentity();
+            return saveData.Options.OnlinePlayerToken;
+        }
+
+        private string GetOnlinePlayerName()
+        {
+            EnsureOnlineIdentity();
+            return string.IsNullOrWhiteSpace(saveData.Options.OnlinePlayerName) ? "玩家" : saveData.Options.OnlinePlayerName.Trim();
+        }
+
+        private void ApplyOnlinePlayerName()
+        {
+            if (onlinePlayerNameInput == null)
+            {
+                return;
+            }
+
+            EnsureOnlineIdentity();
+            string value = onlinePlayerNameInput.text == null ? string.Empty : onlinePlayerNameInput.text.Trim();
+            saveData.Options.OnlinePlayerName = string.IsNullOrEmpty(value) ? "玩家" : value;
+            SaveManager.Save(saveData);
+            if (onlineClient != null && onlineClient.IsConnected)
+            {
+                onlineClient.Send(new OnlineMessage { type = "AUTH", playerToken = GetOnlinePlayerToken(), playerName = GetOnlinePlayerName() });
+            }
+            RefreshOnlineLobby("昵称已更新。");
         }
 
         private void MigrateLegacySaveData()
@@ -735,6 +1801,11 @@ namespace SweetJumpJump
                     saveData.Rooms[i].ThemeId = saveData.Options.ThemeId;
                 }
             }
+
+            if (string.IsNullOrWhiteSpace(saveData.Options.CustomMusicPath))
+            {
+                saveData.Options.CustomMusicPath = string.Empty;
+            }
         }
 
         private void RefreshRoomCards()
@@ -761,11 +1832,11 @@ namespace SweetJumpJump
                 layout.childForceExpandHeight = false;
 
                 LayoutElement element = card.AddComponent<LayoutElement>();
-                element.preferredHeight = 380f;
+                element.preferredHeight = 470f;
 
-                Text roomName = CreateText("RoomName", card.transform, room.RoomName, 48, FontStyle.Bold, new Color(0.47f, 0.22f, 0.31f), TextAnchor.MiddleLeft);
+                TMP_Text roomName = CreateText("RoomName", card.transform, room.RoomName, 48, FontStyle.Bold, new Color(0.47f, 0.22f, 0.31f), TextAnchor.MiddleLeft);
                 roomName.gameObject.AddComponent<LayoutElement>().preferredHeight = 62f;
-                Text roomBody = CreateText(
+                TMP_Text roomBody = CreateText(
                     "RoomBody",
                     card.transform,
                     GetRoomSummary(room),
@@ -773,7 +1844,10 @@ namespace SweetJumpJump
                     FontStyle.Normal,
                     new Color(0.53f, 0.35f, 0.42f),
                     TextAnchor.UpperLeft);
-                roomBody.gameObject.AddComponent<LayoutElement>().preferredHeight = 170f;
+                roomBody.enableAutoSizing = false;
+                roomBody.fontSize = 30;
+                roomBody.lineSpacing = 0.92f;
+                roomBody.gameObject.AddComponent<LayoutElement>().preferredHeight = 252f;
 
                 GameObject buttonRow = new GameObject("RoomButtonRow", typeof(RectTransform), typeof(HorizontalLayoutGroup));
                 buttonRow.transform.SetParent(card.transform, false);
@@ -828,7 +1902,25 @@ namespace SweetJumpJump
                 GetThemeLabel(room.ThemeId),
                 room.PromptEnabled ? "开" : "关",
                 room.PromptIntervalSeconds,
-                string.Join("  ", activeSlots.ToArray()));
+                FormatRoomSummaryRows(activeSlots));
+        }
+
+        private static string FormatRoomSummaryRows(List<string> activeSlots)
+        {
+            List<string> rows = new List<string>();
+            for (int i = 0; i < activeSlots.Count; i += 2)
+            {
+                if (i + 1 < activeSlots.Count)
+                {
+                    rows.Add(activeSlots[i] + "  " + activeSlots[i + 1]);
+                }
+                else
+                {
+                    rows.Add(activeSlots[i]);
+                }
+            }
+
+            return string.Join("\n", rows.ToArray());
         }
 
         private void DeleteRoom(RoomConfig room)
@@ -976,13 +2068,14 @@ namespace SweetJumpJump
             }
 
             optionsSummaryText.text = string.Format(
-                "当前配置\n默认规则：{0}\n主题：{1}\n音效：{2}\n背景音乐：{3}\n催促：{4} / {5} 秒",
+                "当前配置\n默认规则：{0}\n主题：{1}\n音效：{2}\n背景音乐：{3}\n催促：{4} / {5} 秒\n音乐文件：{6}",
                 BoardLayout.GetRuleLabel(saveData.Options.DefaultRule),
                 GetThemeLabel(saveData.Options.ThemeId),
                 saveData.Options.SoundEnabled ? "开启" : "关闭",
                 saveData.Options.MusicEnabled ? "开启" : "关闭",
                 saveData.Options.PromptEnabled ? "开启" : "关闭",
-                saveData.Options.PromptIntervalSeconds);
+                saveData.Options.PromptIntervalSeconds,
+                string.IsNullOrWhiteSpace(saveData.Options.CustomMusicPath) ? "默认旋律" : Path.GetFileName(saveData.Options.CustomMusicPath));
 
             SetButtonLabel(ruleToggleButton, string.Format("默认规则：{0}", BoardLayout.GetRuleLabel(saveData.Options.DefaultRule)));
             SetButtonLabel(themeToggleButton, string.Format("背景主题：{0}", GetThemeLabel(saveData.Options.ThemeId)));
@@ -990,6 +2083,14 @@ namespace SweetJumpJump
             SetButtonLabel(musicToggleButton, saveData.Options.MusicEnabled ? "背景音乐：开" : "背景音乐：关");
             SetButtonLabel(promptToggleButton, saveData.Options.PromptEnabled ? "催促：开" : "催促：关");
             SetButtonLabel(promptIntervalButton, string.Format("催促间隔：{0} 秒", saveData.Options.PromptIntervalSeconds));
+            SetButtonLabel(musicPickButton, NativeMusicPicker.IsSupported ? "从文件选择MP3" : "选择MP3文件");
+            SetButtonLabel(musicResetButton, "恢复默认音乐");
+            if (musicImportStatusText != null)
+            {
+                musicImportStatusText.text = string.IsNullOrWhiteSpace(saveData.Options.CustomMusicPath)
+                    ? "当前使用内置背景音乐。"
+                    : "当前音乐：" + Path.GetFileName(saveData.Options.CustomMusicPath);
+            }
         }
 
         private void ToggleDefaultRule()
@@ -1042,6 +2143,60 @@ namespace SweetJumpJump
             saveData.Options.PromptIntervalSeconds = GetNextPromptInterval(saveData.Options.PromptIntervalSeconds);
             SyncDefaultRoomWithOptions();
             SaveManager.Save(saveData);
+            RefreshOptionsSummary();
+        }
+
+        private void ChooseMusicFile()
+        {
+            if (NativeMusicPicker.IsSupported)
+            {
+                if (musicImportStatusText != null)
+                {
+                    musicImportStatusText.text = "正在打开文件选择器...";
+                }
+
+                NativeMusicPicker.Open(gameObject.name);
+                return;
+            }
+
+            if (musicImportStatusText != null)
+            {
+                musicImportStatusText.text = "请在 iPad/iPhone 上通过“文件”选择 MP3。";
+            }
+        }
+
+        public void OnNativeMusicPicked(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                OnNativeMusicPickCancelled(string.Empty);
+                return;
+            }
+
+            if (musicImportStatusText != null)
+            {
+                musicImportStatusText.text = "正在导入：" + Path.GetFileName(path);
+            }
+
+            StartCoroutine(LoadCustomMusic(path, true));
+        }
+
+        public void OnNativeMusicPickCancelled(string message)
+        {
+            if (musicImportStatusText != null)
+            {
+                musicImportStatusText.text = string.IsNullOrWhiteSpace(message) ? "未选择音乐文件。" : message;
+            }
+        }
+
+        private void ResetMusicToDefault()
+        {
+            saveData.Options.CustomMusicPath = string.Empty;
+            musicClip = CreateMusicLoop();
+            musicSource.Stop();
+            musicSource.clip = musicClip;
+            SaveManager.Save(saveData);
+            RefreshMusicState();
             RefreshOptionsSummary();
         }
 
@@ -1116,7 +2271,7 @@ namespace SweetJumpJump
                 camera.backgroundColor = activeTheme.Backdrop;
             }
 
-            RectTransform[] panels = { splashPanel, menuPanel, optionsPanel, roomsPanel, roomEditPanel, gamePanel };
+            RectTransform[] panels = { splashPanel, menuPanel, optionsPanel, roomsPanel, roomEditPanel, onlinePanel, gamePanel };
             for (int i = 0; i < panels.Length; i++)
             {
                 if (panels[i] == null)
@@ -1219,7 +2374,7 @@ namespace SweetJumpJump
                 colors.disabledColor = new Color(0.05f, 0.05f, 0.05f, 0.36f);
                 button.colors = colors;
 
-                Text label = button.GetComponentInChildren<Text>();
+                TMP_Text label = button.GetComponentInChildren<TMP_Text>();
                 if (label != null)
                 {
                     // 棋盘底部按钮文字颜色；不可点时降低透明度。
@@ -1243,6 +2398,16 @@ namespace SweetJumpJump
             return selectedRoom == null ? saveData.Options.MusicEnabled : selectedRoom.MusicEnabled;
         }
 
+        private bool ShouldPlayMusic()
+        {
+            return gamePanel != null
+                && gamePanel.gameObject.activeInHierarchy
+                && session != null
+                && selectedRoom != null
+                && !session.IsGameOver
+                && IsMusicEnabled();
+        }
+
         private void PlaySfx(string clipId)
         {
             if (sfxSource == null || !IsSoundEnabled())
@@ -1264,7 +2429,7 @@ namespace SweetJumpJump
                 return;
             }
 
-            if (IsMusicEnabled())
+            if (ShouldPlayMusic())
             {
                 if (!musicSource.isPlaying)
                 {
@@ -1338,6 +2503,71 @@ namespace SweetJumpJump
             AudioClip clip = AudioClip.Create("sweet_loop", sampleCount, 1, sampleRate, false);
             clip.SetData(samples, 0);
             return clip;
+        }
+
+        private IEnumerator LoadCustomMusic(string path, bool persist)
+        {
+            string resolvedPath = path;
+            if (!Path.IsPathRooted(resolvedPath))
+            {
+                resolvedPath = Path.Combine(Application.persistentDataPath, resolvedPath);
+            }
+
+            if (!File.Exists(resolvedPath))
+            {
+                if (persist && optionsSummaryText != null)
+                {
+                    optionsSummaryText.text = "没有找到 MP3 文件：\n" + resolvedPath;
+                }
+                if (persist && musicImportStatusText != null)
+                {
+                    musicImportStatusText.text = "没有找到 MP3 文件。";
+                }
+                yield break;
+            }
+
+            using (UnityWebRequest request = UnityWebRequestMultimedia.GetAudioClip("file://" + resolvedPath, AudioType.MPEG))
+            {
+                yield return request.SendWebRequest();
+
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    if (persist && optionsSummaryText != null)
+                    {
+                        optionsSummaryText.text = "导入 MP3 失败：\n" + request.error;
+                    }
+                    if (persist && musicImportStatusText != null)
+                    {
+                        musicImportStatusText.text = "导入 MP3 失败：" + request.error;
+                    }
+                    yield break;
+                }
+
+                AudioClip clip = DownloadHandlerAudioClip.GetContent(request);
+                if (clip == null)
+                {
+                    if (persist && optionsSummaryText != null)
+                    {
+                        optionsSummaryText.text = "导入 MP3 失败：音频内容为空。";
+                    }
+                    if (persist && musicImportStatusText != null)
+                    {
+                        musicImportStatusText.text = "导入 MP3 失败：音频内容为空。";
+                    }
+                    yield break;
+                }
+
+                musicClip = clip;
+                musicSource.Stop();
+                musicSource.clip = musicClip;
+                if (persist)
+                {
+                    saveData.Options.CustomMusicPath = resolvedPath;
+                    SaveManager.Save(saveData);
+                }
+                RefreshMusicState();
+                RefreshOptionsSummary();
+            }
         }
 
         private void UpdateSelectionPulse()
@@ -1538,17 +2768,19 @@ namespace SweetJumpJump
                 return;
             }
 
-            float radius = CalculateAdaptiveBoardRadius(containerSize);
-            Vector2 centerOffset = CalculateBoardCenterOffset(radius);
+            float viewRotation = GetBoardViewRotationDegrees();
+            float radius = CalculateAdaptiveBoardRadius(containerSize, viewRotation);
+            Vector2 centerOffset = CalculateBoardCenterOffset(radius, viewRotation);
 
             foreach (BoardCellView view in cellViews.Values)
             {
                 float x = Mathf.Sqrt(3f) * radius * (view.Coord.Q + (view.Coord.R * 0.5f)) - centerOffset.x;
                 float y = -1.5f * radius * view.Coord.R - centerOffset.y;
+                Vector2 rotated = RotatePoint(new Vector2(x + centerOffset.x, y + centerOffset.y), viewRotation) - centerOffset;
 
                 RectTransform cellRect = view.GetComponent<RectTransform>();
                 cellRect.sizeDelta = new Vector2(radius * 2f, radius * 2f);
-                cellRect.anchoredPosition = new Vector2(x, y);
+                cellRect.anchoredPosition = rotated;
 
                 SetRectSize(view.HintImage, BoardBaseSlotRingSize * 0.72f * radius / BoardBaseCellRadius);
                 SetRectSize(view.SlotRingImage, BoardBaseSlotRingSize * radius / BoardBaseCellRadius);
@@ -1576,9 +2808,9 @@ namespace SweetJumpJump
             graphic.rectTransform.sizeDelta = new Vector2(size, size);
         }
 
-        private static float CalculateAdaptiveBoardRadius(Vector2 containerSize)
+        private float CalculateAdaptiveBoardRadius(Vector2 containerSize, float rotationDegrees)
         {
-            Vector4 bounds = CalculateBoardBounds(1f);
+            Vector4 bounds = CalculateBoardBounds(1f, rotationDegrees);
             float boardWidth = bounds.z - bounds.x;
             float boardHeight = bounds.w - bounds.y;
             float safeWidth = containerSize.x * (1f - BoardSafeMarginRatio * 2f);
@@ -1586,13 +2818,13 @@ namespace SweetJumpJump
             return Mathf.Max(1f, Mathf.Min(safeWidth / boardWidth, safeHeight / boardHeight));
         }
 
-        private static Vector2 CalculateBoardCenterOffset(float radius)
+        private Vector2 CalculateBoardCenterOffset(float radius, float rotationDegrees)
         {
-            Vector4 bounds = CalculateBoardBounds(radius);
+            Vector4 bounds = CalculateBoardBounds(radius, rotationDegrees);
             return new Vector2((bounds.x + bounds.z) * 0.5f, (bounds.y + bounds.w) * 0.5f);
         }
 
-        private static Vector4 CalculateBoardBounds(float radius)
+        private Vector4 CalculateBoardBounds(float radius, float rotationDegrees)
         {
             IReadOnlyList<HexCoord> cells = BoardLayout.AllCells;
             float minX = float.MaxValue;
@@ -1605,13 +2837,53 @@ namespace SweetJumpJump
                 HexCoord coord = cells[i];
                 float x = Mathf.Sqrt(3f) * radius * (coord.Q + (coord.R * 0.5f));
                 float y = -1.5f * radius * coord.R;
-                minX = Mathf.Min(minX, x - radius);
-                maxX = Mathf.Max(maxX, x + radius);
-                minY = Mathf.Min(minY, y - radius);
-                maxY = Mathf.Max(maxY, y + radius);
+                Vector2 rotated = RotatePoint(new Vector2(x, y), rotationDegrees);
+                minX = Mathf.Min(minX, rotated.x - radius);
+                maxX = Mathf.Max(maxX, rotated.x + radius);
+                minY = Mathf.Min(minY, rotated.y - radius);
+                maxY = Mathf.Max(maxY, rotated.y + radius);
             }
 
             return new Vector4(minX, minY, maxX, maxY);
+        }
+
+        private float GetBoardViewRotationDegrees()
+        {
+            if (!onlineMode)
+            {
+                return 0f;
+            }
+
+            switch (onlineSlot)
+            {
+                case SlotId.Bottom:
+                    return 0f;
+                case SlotId.BottomLeft:
+                    return 60f;
+                case SlotId.TopLeft:
+                    return 120f;
+                case SlotId.Top:
+                    return 180f;
+                case SlotId.TopRight:
+                    return -120f;
+                case SlotId.BottomRight:
+                    return -60f;
+                default:
+                    return 0f;
+            }
+        }
+
+        private static Vector2 RotatePoint(Vector2 point, float degrees)
+        {
+            if (Mathf.Abs(degrees) < 0.001f)
+            {
+                return point;
+            }
+
+            float radians = degrees * Mathf.Deg2Rad;
+            float cos = Mathf.Cos(radians);
+            float sin = Mathf.Sin(radians);
+            return new Vector2(point.x * cos - point.y * sin, point.x * sin + point.y * cos);
         }
 
         private void BuildSplashPanel()
@@ -1626,22 +2898,26 @@ namespace SweetJumpJump
             CreateText("MenuTitle", menuPanel, "甜姐的跳跳棋", 88, FontStyle.Bold, new Color(0.72f, 0.24f, 0.41f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.76f), new Vector2(0.5f, 0.76f), new Vector2(1100f, 120f));
             CreateText("MenuSubtitle", menuPanel, "甜姐第一 比赛第二", 34, FontStyle.Normal, new Color(0.55f, 0.37f, 0.44f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.67f), new Vector2(0.5f, 0.67f), new Vector2(1200f, 80f));
 
-            CreateButton(menuPanel, "开始游戏", ShowRooms, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(620f, 116f), Vector2.zero);
-            CreateButton(menuPanel, "游戏选项", ShowOptions, new Vector2(0.5f, 0.41f), new Vector2(0.5f, 0.41f), new Vector2(620f, 116f), Vector2.zero);
+            CreateButton(menuPanel, "开始游戏", ShowRooms, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), PrimaryMenuButtonSize, Vector2.zero);
+            CreateButton(menuPanel, "在线玩", ShowOnline, new Vector2(0.5f, 0.41f), new Vector2(0.5f, 0.41f), PrimaryMenuButtonSize, Vector2.zero);
+            CreateButton(menuPanel, "游戏选项", ShowOptions, new Vector2(0.5f, 0.32f), new Vector2(0.5f, 0.32f), PrimaryMenuButtonSize, Vector2.zero);
         }
 
         private void BuildOptionsPanel()
         {
             CreateText("OptionsTitle", optionsPanel, "游戏选项", 76, FontStyle.Bold, new Color(0.71f, 0.25f, 0.41f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.83f), new Vector2(0.5f, 0.83f), new Vector2(800f, 100f));
-            optionsSummaryText = CreateText("OptionsSummary", optionsPanel, string.Empty, 36, FontStyle.Normal, new Color(0.54f, 0.35f, 0.44f), TextAnchor.UpperLeft, new Vector2(0.5f, 0.62f), new Vector2(0.5f, 0.62f), new Vector2(840f, 260f));
+            optionsSummaryText = CreateText("OptionsSummary", optionsPanel, string.Empty, 32, FontStyle.Normal, new Color(0.54f, 0.35f, 0.44f), TextAnchor.UpperLeft, new Vector2(0.5f, 0.64f), new Vector2(0.5f, 0.64f), new Vector2(880f, 300f));
 
-            ruleToggleButton = CreateButton(optionsPanel, "默认规则：一子跳", ToggleDefaultRule, new Vector2(0.5f, 0.48f), new Vector2(0.5f, 0.48f), new Vector2(620f, 86f), Vector2.zero);
-            themeToggleButton = CreateButton(optionsPanel, "背景主题：粉色糖果", ToggleTheme, new Vector2(0.5f, 0.405f), new Vector2(0.5f, 0.405f), new Vector2(620f, 78f), Vector2.zero);
-            soundToggleButton = CreateButton(optionsPanel, "音效：开", ToggleSound, new Vector2(0.5f, 0.33f), new Vector2(0.5f, 0.33f), new Vector2(620f, 78f), Vector2.zero);
-            musicToggleButton = CreateButton(optionsPanel, "背景音乐：开", ToggleMusic, new Vector2(0.5f, 0.255f), new Vector2(0.5f, 0.255f), new Vector2(620f, 78f), Vector2.zero);
-            promptToggleButton = CreateButton(optionsPanel, "催促：关", TogglePrompt, new Vector2(0.5f, 0.18f), new Vector2(0.5f, 0.18f), new Vector2(620f, 78f), Vector2.zero);
-            promptIntervalButton = CreateButton(optionsPanel, "催促间隔：30 秒", CyclePromptInterval, new Vector2(0.5f, 0.105f), new Vector2(0.5f, 0.105f), new Vector2(620f, 78f), Vector2.zero);
-            CreateButton(optionsPanel, "返回主菜单", ShowMenu, new Vector2(0.5f, 0.035f), new Vector2(0.5f, 0.035f), new Vector2(620f, 70f), Vector2.zero);
+            ruleToggleButton = CreateButton(optionsPanel, "默认规则：一子跳", ToggleDefaultRule, new Vector2(0.5f, 0.48f), new Vector2(0.5f, 0.48f), OptionButtonSize, Vector2.zero);
+            themeToggleButton = CreateButton(optionsPanel, "背景主题：粉色糖果", ToggleTheme, new Vector2(0.5f, 0.405f), new Vector2(0.5f, 0.405f), OptionButtonSize, Vector2.zero);
+            soundToggleButton = CreateButton(optionsPanel, "音效：开", ToggleSound, new Vector2(0.5f, 0.33f), new Vector2(0.5f, 0.33f), OptionButtonSize, Vector2.zero);
+            musicToggleButton = CreateButton(optionsPanel, "背景音乐：开", ToggleMusic, new Vector2(0.5f, 0.255f), new Vector2(0.5f, 0.255f), OptionButtonSize, Vector2.zero);
+            promptToggleButton = CreateButton(optionsPanel, "催促：关", TogglePrompt, new Vector2(0.5f, 0.195f), new Vector2(0.5f, 0.195f), OptionHalfButtonSize, new Vector2(-160f, 0f));
+            promptIntervalButton = CreateButton(optionsPanel, "催促间隔：30 秒", CyclePromptInterval, new Vector2(0.5f, 0.195f), new Vector2(0.5f, 0.195f), OptionHalfButtonSize, new Vector2(160f, 0f));
+            musicImportStatusText = CreateText("MusicImportStatus", optionsPanel, "当前使用内置背景音乐。", 26, FontStyle.Normal, new Color(0.54f, 0.35f, 0.44f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.15f), new Vector2(0.5f, 0.15f), new Vector2(900f, 54f));
+            musicPickButton = CreateButton(optionsPanel, "从文件选择MP3", ChooseMusicFile, new Vector2(0.5f, 0.095f), new Vector2(0.5f, 0.095f), OptionFileButtonSize, new Vector2(-210f, 0f), ButtonLabelLength.SixCharacters);
+            musicResetButton = CreateButton(optionsPanel, "恢复默认音乐", ResetMusicToDefault, new Vector2(0.5f, 0.095f), new Vector2(0.5f, 0.095f), OptionFileButtonSize, new Vector2(210f, 0f), ButtonLabelLength.SixCharacters);
+            CreateButton(optionsPanel, "返回主菜单", ShowMenu, new Vector2(0.5f, 0.035f), new Vector2(0.5f, 0.035f), FullWidthButtonSize, Vector2.zero, ButtonLabelLength.FourCharacters);
         }
 
         private void BuildRoomsPanel()
@@ -1693,8 +2969,8 @@ namespace SweetJumpJump
             scrollRect.vertical = true;
             scrollRect.movementType = ScrollRect.MovementType.Clamped;
 
-            CreateButton(roomsPanel, "新建房间", () => ShowRoomEditor(null), new Vector2(0.5f, 0.16f), new Vector2(0.5f, 0.16f), new Vector2(620f, 82f), Vector2.zero);
-            CreateButton(roomsPanel, "返回主菜单", ShowMenu, new Vector2(0.5f, 0.075f), new Vector2(0.5f, 0.075f), new Vector2(620f, 82f), Vector2.zero);
+            CreateButton(roomsPanel, "新建房间", () => ShowRoomEditor(null), new Vector2(0.5f, 0.16f), new Vector2(0.5f, 0.16f), FullWidthButtonSize, Vector2.zero);
+            CreateButton(roomsPanel, "返回主菜单", ShowMenu, new Vector2(0.5f, 0.075f), new Vector2(0.5f, 0.075f), FullWidthButtonSize, Vector2.zero);
         }
 
         private void BuildRoomEditPanel()
@@ -1703,11 +2979,11 @@ namespace SweetJumpJump
             CreateText("RoomNameLabel", roomEditPanel, "房间名称", 30, FontStyle.Bold, new Color(0.48f, 0.28f, 0.37f), TextAnchor.MiddleLeft, new Vector2(0.5f, 0.82f), new Vector2(0.5f, 0.82f), new Vector2(900f, 50f));
             roomNameInput = CreateInputField(roomEditPanel, new Vector2(0.5f, 0.775f), new Vector2(900f, 72f));
 
-            roomRuleToggleButton = CreateButton(roomEditPanel, "规则：一子跳", ToggleRoomRule, new Vector2(0.5f, 0.7f), new Vector2(0.5f, 0.7f), new Vector2(430f, 72f), new Vector2(-235f, 0f));
-            roomThemeToggleButton = CreateButton(roomEditPanel, "主题：粉色糖果", ToggleRoomTheme, new Vector2(0.5f, 0.7f), new Vector2(0.5f, 0.7f), new Vector2(430f, 72f), new Vector2(235f, 0f));
-            roomSoundToggleButton = CreateButton(roomEditPanel, "音效：开", ToggleRoomSound, new Vector2(0.5f, 0.635f), new Vector2(0.5f, 0.635f), new Vector2(286f, 66f), new Vector2(-310f, 0f));
-            roomMusicToggleButton = CreateButton(roomEditPanel, "音乐：开", ToggleRoomMusic, new Vector2(0.5f, 0.635f), new Vector2(0.5f, 0.635f), new Vector2(286f, 66f), Vector2.zero);
-            roomPromptToggleButton = CreateButton(roomEditPanel, "催促：关", ToggleRoomPrompt, new Vector2(0.5f, 0.635f), new Vector2(0.5f, 0.635f), new Vector2(286f, 66f), new Vector2(310f, 0f));
+            roomRuleToggleButton = CreateButton(roomEditPanel, "规则：一子跳", ToggleRoomRule, new Vector2(0.5f, 0.7f), new Vector2(0.5f, 0.7f), RoomEditLargeButtonSize, new Vector2(-235f, 0f));
+            roomThemeToggleButton = CreateButton(roomEditPanel, "主题：粉色糖果", ToggleRoomTheme, new Vector2(0.5f, 0.7f), new Vector2(0.5f, 0.7f), RoomEditLargeButtonSize, new Vector2(235f, 0f));
+            roomSoundToggleButton = CreateButton(roomEditPanel, "音效：开", ToggleRoomSound, new Vector2(0.5f, 0.635f), new Vector2(0.5f, 0.635f), RoomEditCompactButtonSize, new Vector2(-310f, 0f));
+            roomMusicToggleButton = CreateButton(roomEditPanel, "音乐：开", ToggleRoomMusic, new Vector2(0.5f, 0.635f), new Vector2(0.5f, 0.635f), RoomEditCompactButtonSize, Vector2.zero);
+            roomPromptToggleButton = CreateButton(roomEditPanel, "催促：关", ToggleRoomPrompt, new Vector2(0.5f, 0.635f), new Vector2(0.5f, 0.635f), RoomEditCompactButtonSize, new Vector2(310f, 0f));
             roomPromptIntervalButton = CreateButton(roomEditPanel, "催促间隔：30 秒", CycleRoomPromptInterval, new Vector2(0.5f, 0.575f), new Vector2(0.5f, 0.575f), new Vector2(900f, 66f), Vector2.zero);
 
             float startY = 0.505f;
@@ -1719,13 +2995,269 @@ namespace SweetJumpJump
                 int row = i / 2;
                 int col = i % 2;
                 Vector2 offset = new Vector2(col == 0 ? -235f : 235f, 0f);
-                Button slotButton = CreateButton(roomEditPanel, BoardLayout.GetSlotLabel(slotId), () => CycleRoomSlot(slotId), new Vector2(0.5f, startY - row * rowGap), new Vector2(0.5f, startY - row * rowGap), new Vector2(430f, 66f), offset);
+                Button slotButton = CreateButton(roomEditPanel, BoardLayout.GetSlotLabel(slotId), () => CycleRoomSlot(slotId), new Vector2(0.5f, startY - row * rowGap), new Vector2(0.5f, startY - row * rowGap), RoomEditLargeButtonSize, offset);
                 roomSlotButtons[slotId] = slotButton;
             }
 
             roomEditValidationText = CreateText("RoomEditValidation", roomEditPanel, string.Empty, 28, FontStyle.Normal, new Color(0.7f, 0.22f, 0.35f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.3f), new Vector2(0.5f, 0.3f), new Vector2(980f, 70f));
-            CreateButton(roomEditPanel, "保存房间", SaveEditedRoom, new Vector2(0.5f, 0.2f), new Vector2(0.5f, 0.2f), new Vector2(430f, 82f), new Vector2(-235f, 0f));
-            CreateButton(roomEditPanel, "取消", ShowRooms, new Vector2(0.5f, 0.2f), new Vector2(0.5f, 0.2f), new Vector2(430f, 82f), new Vector2(235f, 0f));
+            CreateButton(roomEditPanel, "保存房间", SaveEditedRoom, new Vector2(0.5f, 0.2f), new Vector2(0.5f, 0.2f), RoomEditActionButtonSize, new Vector2(-235f, 0f));
+            CreateButton(roomEditPanel, "取消", ShowRooms, new Vector2(0.5f, 0.2f), new Vector2(0.5f, 0.2f), RoomEditActionButtonSize, new Vector2(235f, 0f));
+        }
+
+        private void BuildOnlinePanel()
+        {
+            onlineAiSlotButtons.Clear();
+
+            CreateText("OnlineTitle", onlinePanel, "在线房间", 66, FontStyle.Bold, new Color(0.7f, 0.25f, 0.4f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.91f), new Vector2(0.5f, 0.91f), new Vector2(900f, 88f));
+
+            GameObject scrollObject = new GameObject("OnlineScroll", typeof(RectTransform), typeof(Image), typeof(ScrollRect));
+            scrollObject.transform.SetParent(onlinePanel, false);
+            RectTransform scrollRectTransform = scrollObject.GetComponent<RectTransform>();
+            scrollRectTransform.anchorMin = new Vector2(0.08f, 0.11f);
+            scrollRectTransform.anchorMax = new Vector2(0.92f, 0.84f);
+            scrollRectTransform.offsetMin = Vector2.zero;
+            scrollRectTransform.offsetMax = Vector2.zero;
+            scrollObject.GetComponent<Image>().color = new Color(1f, 0.98f, 0.99f, 0.42f);
+
+            GameObject viewportObject = new GameObject("Viewport", typeof(RectTransform), typeof(Image), typeof(Mask));
+            viewportObject.transform.SetParent(scrollObject.transform, false);
+            RectTransform viewportRect = viewportObject.GetComponent<RectTransform>();
+            viewportRect.anchorMin = Vector2.zero;
+            viewportRect.anchorMax = Vector2.one;
+            viewportRect.offsetMin = new Vector2(18f, 18f);
+            viewportRect.offsetMax = new Vector2(-18f, -18f);
+            viewportObject.GetComponent<Image>().color = new Color(1f, 1f, 1f, 0.08f);
+            viewportObject.GetComponent<Mask>().showMaskGraphic = false;
+
+            GameObject content = new GameObject("OnlineContent", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(ContentSizeFitter));
+            content.transform.SetParent(viewportObject.transform, false);
+            RectTransform contentRect = content.GetComponent<RectTransform>();
+            contentRect.anchorMin = new Vector2(0f, 1f);
+            contentRect.anchorMax = new Vector2(1f, 1f);
+            contentRect.pivot = new Vector2(0.5f, 1f);
+            contentRect.offsetMin = Vector2.zero;
+            contentRect.offsetMax = Vector2.zero;
+
+            VerticalLayoutGroup layout = content.GetComponent<VerticalLayoutGroup>();
+            layout.padding = new RectOffset(14, 14, 14, 14);
+            layout.spacing = 14f;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
+
+            content.GetComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            ScrollRect scrollRect = scrollObject.GetComponent<ScrollRect>();
+            scrollRect.viewport = viewportRect;
+            scrollRect.content = contentRect;
+            scrollRect.horizontal = false;
+            scrollRect.vertical = true;
+            scrollRect.movementType = ScrollRect.MovementType.Clamped;
+
+            TMP_Text serverText = CreateText("OnlineServer", content.transform, "服务器：jump.mddxz.top:53333", 28, FontStyle.Normal, new Color(0.55f, 0.36f, 0.43f), TextAnchor.MiddleCenter, size: new Vector2(900f, 46f));
+            SetLayoutElement(serverText, 46f);
+
+            onlinePlayerNameInput = CreateInputField(content.transform, new Vector2(0.5f, 0.5f), new Vector2(900f, 62f));
+            onlinePlayerNameInput.text = GetOnlinePlayerName();
+            onlinePlayerNameInput.characterLimit = 14;
+            TMP_Text namePlaceholder = onlinePlayerNameInput.placeholder as TMP_Text;
+            if (namePlaceholder != null)
+            {
+                namePlaceholder.text = "你的昵称";
+            }
+            onlinePlayerNameInput.onEndEdit.AddListener(_ => ApplyOnlinePlayerName());
+            SetLayoutElement(onlinePlayerNameInput, 62f);
+
+            onlineRoomKeyText = CreateText("OnlineRoomKey", content.transform, "房间密钥：未创建", 36, FontStyle.Bold, new Color(0.48f, 0.28f, 0.37f), TextAnchor.MiddleCenter, size: new Vector2(900f, 60f));
+            SetLayoutElement(onlineRoomKeyText, 60f);
+
+            onlineStatusText = CreateText("OnlineStatus", content.transform, string.Empty, 27, FontStyle.Normal, new Color(0.45f, 0.28f, 0.36f), TextAnchor.MiddleCenter, size: new Vector2(900f, 130f));
+            SetLayoutElement(onlineStatusText, 130f);
+
+            onlineDiscoveryText = CreateText("OnlineDiscovery", content.transform, "发现房间", 30, FontStyle.Bold, new Color(0.48f, 0.28f, 0.37f), TextAnchor.MiddleCenter, size: new Vector2(900f, 44f));
+            SetLayoutElement(onlineDiscoveryText, 44f);
+
+            GameObject discoveryListObject = new GameObject("OnlineDiscoveryList", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(ContentSizeFitter), typeof(LayoutElement));
+            discoveryListObject.transform.SetParent(content.transform, false);
+            onlineDiscoveryListContainer = discoveryListObject.GetComponent<RectTransform>();
+            VerticalLayoutGroup discoveryLayout = discoveryListObject.GetComponent<VerticalLayoutGroup>();
+            discoveryLayout.spacing = 10f;
+            discoveryLayout.childControlWidth = true;
+            discoveryLayout.childControlHeight = true;
+            discoveryLayout.childForceExpandWidth = true;
+            discoveryLayout.childForceExpandHeight = false;
+            discoveryListObject.GetComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            LayoutElement discoveryElement = discoveryListObject.GetComponent<LayoutElement>();
+            discoveryElement.preferredHeight = 146f;
+            discoveryElement.minHeight = 92f;
+
+            onlineRoomKeyInput = CreateInputField(content.transform, new Vector2(0.5f, 0.5f), new Vector2(900f, 66f));
+            SetLayoutElement(onlineRoomKeyInput, 66f);
+            onlineRoomKeyInput.characterLimit = 8;
+            TMP_Text placeholder = onlineRoomKeyInput.placeholder as TMP_Text;
+            if (placeholder != null)
+            {
+                placeholder.text = "输入房间密钥";
+            }
+
+            Transform rowOne = CreateLayoutRow(content.transform, "OnlineRowOne", 74f);
+            CreateLayoutButton(rowOne, "创建房间", CreateOnlineRoom, ButtonLabelLength.FourCharacters);
+            CreateLayoutButton(rowOne, "加入房间", JoinOnlineRoom, ButtonLabelLength.FourCharacters);
+
+            Transform rowTwo = CreateLayoutRow(content.transform, "OnlineRowTwo", 74f);
+            onlineReadyButton = CreateLayoutButton(rowTwo, "准备", ToggleOnlineReady, ButtonLabelLength.TwoCharacters);
+            onlineStartButton = CreateLayoutButton(rowTwo, "开始本局", StartOnlineGame, ButtonLabelLength.FourCharacters);
+            onlineAiSettingsButton = CreateLayoutButton(rowTwo, "人机设置", ShowOnlineAiSettings, ButtonLabelLength.FourCharacters);
+
+            CreateButton(onlinePanel, "返回主菜单", () => { DisconnectOnline(); ShowMenu(); }, new Vector2(0.5f, 0.055f), new Vector2(0.5f, 0.055f), FullWidthButtonSize, Vector2.zero);
+
+            onlineJoinRoomConfirmModal = CreateOnlineJoinRoomConfirmModal(onlinePanel);
+            onlineJoinRequestModal = CreateOnlineJoinRequestModal(onlinePanel);
+            onlineAiSettingsModal = CreateOnlineAiSettingsModal(onlinePanel);
+            RefreshOnlineLobby("连接服务器后，可以创建房间或输入密钥加入。");
+        }
+
+        private GameObject CreateOnlineJoinRoomConfirmModal(Transform parent)
+        {
+            GameObject modal = new GameObject("OnlineJoinRoomConfirmModal", typeof(RectTransform), typeof(Image));
+            modal.transform.SetParent(parent, false);
+            RectTransform rect = modal.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            modal.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.38f);
+
+            GameObject card = new GameObject("JoinRoomConfirmCard", typeof(RectTransform), typeof(Image));
+            card.transform.SetParent(modal.transform, false);
+            RectTransform cardRect = card.GetComponent<RectTransform>();
+            cardRect.anchorMin = new Vector2(0.5f, 0.5f);
+            cardRect.anchorMax = new Vector2(0.5f, 0.5f);
+            cardRect.sizeDelta = new Vector2(760f, 340f);
+            cardRect.anchoredPosition = Vector2.zero;
+            card.GetComponent<Image>().color = new Color(1f, 0.98f, 0.99f, 0.98f);
+
+            CreateText("JoinRoomConfirmTitle", card.transform, "申请加入", 50, FontStyle.Bold, new Color(0.55f, 0.22f, 0.34f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.73f), new Vector2(0.5f, 0.73f), new Vector2(660f, 72f));
+            onlineJoinRoomConfirmText = CreateText("JoinRoomConfirmBody", card.transform, "申请加入房间？", 31, FontStyle.Normal, new Color(0.48f, 0.32f, 0.4f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.55f), new Vector2(0.5f, 0.55f), new Vector2(660f, 60f));
+            CreateButton(card.transform, "申请", ConfirmOnlineJoinRoom, new Vector2(0.5f, 0.27f), new Vector2(0.5f, 0.27f), new Vector2(240f, 74f), new Vector2(-140f, 0f), ButtonLabelLength.TwoCharacters);
+            CreateButton(card.transform, "取消", HideOnlineJoinRoomConfirm, new Vector2(0.5f, 0.27f), new Vector2(0.5f, 0.27f), new Vector2(240f, 74f), new Vector2(140f, 0f), ButtonLabelLength.TwoCharacters);
+
+            modal.SetActive(false);
+            return modal;
+        }
+
+        private GameObject CreateOnlineJoinRequestModal(Transform parent)
+        {
+            GameObject modal = new GameObject("OnlineJoinRequestModal", typeof(RectTransform), typeof(Image));
+            modal.transform.SetParent(parent, false);
+            RectTransform rect = modal.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            modal.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.42f);
+
+            GameObject card = new GameObject("JoinRequestCard", typeof(RectTransform), typeof(Image));
+            card.transform.SetParent(modal.transform, false);
+            RectTransform cardRect = card.GetComponent<RectTransform>();
+            cardRect.anchorMin = new Vector2(0.5f, 0.5f);
+            cardRect.anchorMax = new Vector2(0.5f, 0.5f);
+            cardRect.sizeDelta = new Vector2(760f, 360f);
+            cardRect.anchoredPosition = Vector2.zero;
+            card.GetComponent<Image>().color = new Color(1f, 0.98f, 0.99f, 0.98f);
+
+            CreateText("JoinRequestTitle", card.transform, "加入申请", 50, FontStyle.Bold, new Color(0.55f, 0.22f, 0.34f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.73f), new Vector2(0.5f, 0.73f), new Vector2(660f, 72f));
+            onlineJoinRequestText = CreateText("JoinRequestBody", card.transform, "一位玩家想加入房间。", 31, FontStyle.Normal, new Color(0.48f, 0.32f, 0.4f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.55f), new Vector2(0.5f, 0.55f), new Vector2(660f, 60f));
+            CreateButton(card.transform, "同意", ApprovePendingOnlineJoin, new Vector2(0.5f, 0.28f), new Vector2(0.5f, 0.28f), new Vector2(240f, 74f), new Vector2(-140f, 0f), ButtonLabelLength.TwoCharacters);
+            CreateButton(card.transform, "拒绝", RejectPendingOnlineJoin, new Vector2(0.5f, 0.28f), new Vector2(0.5f, 0.28f), new Vector2(240f, 74f), new Vector2(140f, 0f), ButtonLabelLength.TwoCharacters);
+
+            modal.SetActive(false);
+            return modal;
+        }
+
+        private GameObject CreateOnlineAiSettingsModal(Transform parent)
+        {
+            GameObject modal = new GameObject("OnlineAiSettingsModal", typeof(RectTransform), typeof(Image));
+            modal.transform.SetParent(parent, false);
+            RectTransform rect = modal.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            modal.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.38f);
+
+            GameObject card = new GameObject("AiSettingsCard", typeof(RectTransform), typeof(Image));
+            card.transform.SetParent(modal.transform, false);
+            RectTransform cardRect = card.GetComponent<RectTransform>();
+            cardRect.anchorMin = new Vector2(0.5f, 0.5f);
+            cardRect.anchorMax = new Vector2(0.5f, 0.5f);
+            cardRect.sizeDelta = new Vector2(820f, 560f);
+            cardRect.anchoredPosition = Vector2.zero;
+            card.GetComponent<Image>().color = new Color(1f, 0.98f, 0.99f, 0.98f);
+
+            CreateText("AiSettingsTitle", card.transform, "人机设置", 50, FontStyle.Bold, new Color(0.55f, 0.22f, 0.34f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.86f), new Vector2(0.5f, 0.86f), new Vector2(720f, 70f));
+            SlotId[] slots = BoardLayout.GetSlotsInDisplayOrder();
+            for (int i = 0; i < slots.Length; i += 2)
+            {
+                float y = 0.66f - (i / 2) * 0.15f;
+                SlotId left = slots[i];
+                onlineAiSlotButtons[left] = CreateButton(card.transform, BoardLayout.GetSlotLabel(left), () => ToggleOnlineAiSlot(left), new Vector2(0.5f, y), new Vector2(0.5f, y), new Vector2(330f, 68f), new Vector2(-180f, 0f), ButtonLabelLength.SixCharacters);
+                if (i + 1 < slots.Length)
+                {
+                    SlotId right = slots[i + 1];
+                    onlineAiSlotButtons[right] = CreateButton(card.transform, BoardLayout.GetSlotLabel(right), () => ToggleOnlineAiSlot(right), new Vector2(0.5f, y), new Vector2(0.5f, y), new Vector2(330f, 68f), new Vector2(180f, 0f), ButtonLabelLength.SixCharacters);
+                }
+            }
+
+            CreateButton(card.transform, "完成", HideOnlineAiSettings, new Vector2(0.5f, 0.12f), new Vector2(0.5f, 0.12f), new Vector2(420f, 76f), Vector2.zero, ButtonLabelLength.TwoCharacters);
+
+            modal.SetActive(false);
+            return modal;
+        }
+
+        private Transform CreateLayoutRow(Transform parent, string name, float height)
+        {
+            GameObject rowObject = new GameObject(name, typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
+            rowObject.transform.SetParent(parent, false);
+            HorizontalLayoutGroup layout = rowObject.GetComponent<HorizontalLayoutGroup>();
+            layout.spacing = 14f;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = true;
+
+            LayoutElement layoutElement = rowObject.GetComponent<LayoutElement>();
+            layoutElement.preferredHeight = height;
+            layoutElement.minHeight = height;
+            return rowObject.transform;
+        }
+
+        private Button CreateLayoutButton(Transform parent, string label, Action onClick, ButtonLabelLength labelLength)
+        {
+            Button button = CreateButton(parent, label, onClick, Vector2.zero, Vector2.one, new Vector2(0f, 74f), Vector2.zero, labelLength);
+            LayoutElement layoutElement = button.gameObject.AddComponent<LayoutElement>();
+            layoutElement.flexibleWidth = 1f;
+            layoutElement.preferredHeight = 74f;
+            layoutElement.minHeight = 74f;
+            return button;
+        }
+
+        private static void SetLayoutElement(Component component, float height)
+        {
+            if (component == null)
+            {
+                return;
+            }
+
+            LayoutElement layoutElement = component.gameObject.GetComponent<LayoutElement>();
+            if (layoutElement == null)
+            {
+                layoutElement = component.gameObject.AddComponent<LayoutElement>();
+            }
+
+            layoutElement.preferredHeight = height;
+            layoutElement.minHeight = height;
         }
 
         private void BuildGamePanel()
@@ -1768,19 +3300,49 @@ namespace SweetJumpJump
 
             // 底部栏状态文本颜色。
             statusText = CreateText("Status", bottomControlBar, "请选择一个棋子。", 30, FontStyle.Normal, new Color(1f, 1f, 1f, 0.92f), TextAnchor.MiddleCenter, new Vector2(0.08f, 0.46f), new Vector2(0.92f, 0.46f), new Vector2(0f, 92f));
-            statusText.resizeTextMinSize = 16;
+            statusText.fontSizeMin = 16;
 
-            undoButton = CreateButton(bottomControlBar, "悔棋", HandleUndo, new Vector2(0.23f, 0.16f), new Vector2(0.23f, 0.16f), new Vector2(280f, 82f), Vector2.zero, ButtonLabelLength.TwoCharacters);
-            finishTurnButton = CreateButton(bottomControlBar, "完成移动", HandleFinishTurn, new Vector2(0.5f, 0.16f), new Vector2(0.5f, 0.16f), new Vector2(360f, 82f), Vector2.zero, ButtonLabelLength.FourCharacters);
-            passTurnButton = CreateButton(bottomControlBar, "放弃移动", HandlePassTurn, new Vector2(0.5f, 0.16f), new Vector2(0.5f, 0.16f), new Vector2(360f, 82f), Vector2.zero, ButtonLabelLength.FourCharacters);
-            Button roomsButton = CreateButton(bottomControlBar, "设置", ShowRooms, new Vector2(0.77f, 0.16f), new Vector2(0.77f, 0.16f), new Vector2(280f, 82f), Vector2.zero, ButtonLabelLength.TwoCharacters);
+            undoButton = CreateButton(bottomControlBar, "悔棋", HandleUndo, new Vector2(0.34f, 0.21f), new Vector2(0.34f, 0.21f), GameActionButtonSize, Vector2.zero, ButtonLabelLength.TwoCharacters);
+            finishTurnButton = CreateButton(bottomControlBar, "完成移动", HandleFinishTurn, new Vector2(0.66f, 0.21f), new Vector2(0.66f, 0.21f), GameActionButtonSize, Vector2.zero, ButtonLabelLength.FourCharacters);
+            passTurnButton = CreateButton(bottomControlBar, "放弃移动", HandlePassTurn, new Vector2(0.66f, 0.21f), new Vector2(0.66f, 0.21f), GameActionButtonSize, Vector2.zero, ButtonLabelLength.FourCharacters);
+            Button exitGameButton = CreateButton(gamePanel, "退出", HandleExitCurrentGame, Vector2.one, Vector2.one, new Vector2(132f, 56f), new Vector2(-86f, -58f), ButtonLabelLength.TwoCharacters);
             gameChromeButtons.Add(undoButton);
             gameChromeButtons.Add(finishTurnButton);
             gameChromeButtons.Add(passTurnButton);
-            gameChromeButtons.Add(roomsButton);
+            gameChromeButtons.Add(exitGameButton);
 
             victoryModal = CreateVictoryModal(gamePanel);
+            exitConfirmModal = CreateExitConfirmModal(gamePanel);
             RefreshGameChromeStyle();
+        }
+
+        private GameObject CreateExitConfirmModal(Transform parent)
+        {
+            GameObject modal = new GameObject("ExitConfirmModal", typeof(RectTransform), typeof(Image));
+            modal.transform.SetParent(parent, false);
+            RectTransform rect = modal.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            modal.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.42f);
+
+            GameObject card = new GameObject("ExitConfirmCard", typeof(RectTransform), typeof(Image));
+            card.transform.SetParent(modal.transform, false);
+            RectTransform cardRect = card.GetComponent<RectTransform>();
+            cardRect.anchorMin = new Vector2(0.5f, 0.5f);
+            cardRect.anchorMax = new Vector2(0.5f, 0.5f);
+            cardRect.sizeDelta = new Vector2(720f, 360f);
+            cardRect.anchoredPosition = Vector2.zero;
+            card.GetComponent<Image>().color = new Color(1f, 0.98f, 0.99f, 0.98f);
+
+            CreateText("ExitConfirmTitle", card.transform, "退出本局？", 48, FontStyle.Bold, new Color(0.55f, 0.22f, 0.34f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.72f), new Vector2(0.5f, 0.72f), new Vector2(640f, 72f));
+            CreateText("ExitConfirmBody", card.transform, "当前棋局进度不会保留。", 30, FontStyle.Normal, new Color(0.48f, 0.32f, 0.4f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.55f), new Vector2(0.5f, 0.55f), new Vector2(640f, 56f));
+            CreateButton(card.transform, "确认退出", ConfirmExitCurrentGame, new Vector2(0.5f, 0.28f), new Vector2(0.5f, 0.28f), new Vector2(260f, 72f), new Vector2(-150f, 0f), ButtonLabelLength.FourCharacters);
+            CreateButton(card.transform, "继续本局", HideExitConfirm, new Vector2(0.5f, 0.28f), new Vector2(0.5f, 0.28f), new Vector2(260f, 72f), new Vector2(150f, 0f), ButtonLabelLength.FourCharacters);
+
+            modal.SetActive(false);
+            return modal;
         }
 
         private GameObject CreateVictoryModal(Transform parent)
@@ -1857,10 +3419,13 @@ namespace SweetJumpJump
             optionsPanel.gameObject.SetActive(panel == optionsPanel);
             roomsPanel.gameObject.SetActive(panel == roomsPanel);
             roomEditPanel.gameObject.SetActive(panel == roomEditPanel);
+            onlinePanel.gameObject.SetActive(panel == onlinePanel);
             gamePanel.gameObject.SetActive(panel == gamePanel);
+            RefreshAllUiText();
+            RefreshMusicState();
         }
 
-        private Text CreateText(
+        private TMP_Text CreateText(
             string name,
             Transform parent,
             string text,
@@ -1872,7 +3437,7 @@ namespace SweetJumpJump
             Vector2? anchorMax = null,
             Vector2? size = null)
         {
-            GameObject textObject = new GameObject(name, typeof(RectTransform), typeof(Text));
+            GameObject textObject = new GameObject(name, typeof(RectTransform), typeof(TextMeshProUGUI));
             textObject.transform.SetParent(parent, false);
             RectTransform rect = textObject.GetComponent<RectTransform>();
             Vector2 min = anchorMin ?? new Vector2(0.5f, 0.5f);
@@ -1882,24 +3447,26 @@ namespace SweetJumpJump
             rect.sizeDelta = size ?? new Vector2(400f, 80f);
             rect.anchoredPosition = Vector2.zero;
 
-            Text label = textObject.GetComponent<Text>();
+            TMP_Text label = textObject.GetComponent<TextMeshProUGUI>();
             label.font = defaultFont;
             label.text = text;
             label.fontSize = fontSize;
-            label.fontStyle = style;
+            label.fontStyle = ToTmpFontStyle(style);
             label.color = color;
-            label.alignment = anchor;
-            label.horizontalOverflow = HorizontalWrapMode.Wrap;
-            label.verticalOverflow = VerticalWrapMode.Overflow;
-            label.resizeTextForBestFit = true;
-            label.resizeTextMinSize = Mathf.Max(16, Mathf.RoundToInt(fontSize * 0.68f));
-            label.resizeTextMaxSize = fontSize;
+            label.alignment = ToTmpAlignment(anchor);
+            label.enableWordWrapping = true;
+            label.overflowMode = TextOverflowModes.Overflow;
+            label.enableAutoSizing = false;
+            label.fontSizeMin = Mathf.Max(14, Mathf.RoundToInt(fontSize * 0.68f));
+            label.fontSizeMax = fontSize;
+            label.lineSpacing = 1f;
+            RequestTextCharacters(label, text, fontSize);
             return label;
         }
 
-        private InputField CreateInputField(Transform parent, Vector2 anchor, Vector2 size)
+        private TMP_InputField CreateInputField(Transform parent, Vector2 anchor, Vector2 size)
         {
-            GameObject inputObject = new GameObject("RoomNameInput", typeof(RectTransform), typeof(Image), typeof(InputField));
+            GameObject inputObject = new GameObject("RoomNameInput", typeof(RectTransform), typeof(Image), typeof(TMP_InputField));
             inputObject.transform.SetParent(parent, false);
 
             RectTransform rect = inputObject.GetComponent<RectTransform>();
@@ -1910,19 +3477,19 @@ namespace SweetJumpJump
 
             inputObject.GetComponent<Image>().color = new Color(1f, 0.99f, 1f, 0.98f);
 
-            Text text = CreateText("Text", inputObject.transform, string.Empty, 34, FontStyle.Normal, new Color(0.45f, 0.25f, 0.34f), TextAnchor.MiddleLeft);
+            TMP_Text text = CreateText("Text", inputObject.transform, string.Empty, 34, FontStyle.Normal, new Color(0.45f, 0.25f, 0.34f), TextAnchor.MiddleLeft);
             text.rectTransform.anchorMin = Vector2.zero;
             text.rectTransform.anchorMax = Vector2.one;
             text.rectTransform.offsetMin = new Vector2(24f, 0f);
             text.rectTransform.offsetMax = new Vector2(-24f, 0f);
 
-            Text placeholder = CreateText("Placeholder", inputObject.transform, "请输入房间名", 32, FontStyle.Italic, new Color(0.72f, 0.56f, 0.62f), TextAnchor.MiddleLeft);
+            TMP_Text placeholder = CreateText("Placeholder", inputObject.transform, "请输入房间名", 32, FontStyle.Italic, new Color(0.72f, 0.56f, 0.62f), TextAnchor.MiddleLeft);
             placeholder.rectTransform.anchorMin = Vector2.zero;
             placeholder.rectTransform.anchorMax = Vector2.one;
             placeholder.rectTransform.offsetMin = new Vector2(24f, 0f);
             placeholder.rectTransform.offsetMax = new Vector2(-24f, 0f);
 
-            InputField input = inputObject.GetComponent<InputField>();
+            TMP_InputField input = inputObject.GetComponent<TMP_InputField>();
             input.textComponent = text;
             input.placeholder = placeholder;
             input.characterLimit = 18;
@@ -1957,7 +3524,7 @@ namespace SweetJumpJump
                 onClick();
             });
 
-            Text buttonText = CreateText("Label", buttonObject.transform, label, 34, FontStyle.Bold, new Color(0.47f, 0.22f, 0.31f), TextAnchor.MiddleCenter);
+            TMP_Text buttonText = CreateText("Label", buttonObject.transform, label, 34, FontStyle.Bold, new Color(0.47f, 0.22f, 0.31f), TextAnchor.MiddleCenter);
             buttonText.rectTransform.anchorMin = Vector2.zero;
             buttonText.rectTransform.anchorMax = Vector2.one;
             buttonText.rectTransform.offsetMin = Vector2.zero;
@@ -1971,18 +3538,21 @@ namespace SweetJumpJump
             return button;
         }
 
-        private static void ApplyButtonLabelStyle(Text label, string value, ButtonLabelLength length)
+        private static void ApplyButtonLabelStyle(TMP_Text label, string value, ButtonLabelLength length)
         {
             ButtonLabelProfile profile = GetButtonLabelProfile(length == ButtonLabelLength.Auto ? ResolveButtonLabelLength(value) : length);
             RectTransform rect = label.rectTransform;
-            rect.offsetMin = new Vector2(profile.HorizontalPadding, 0f);
-            rect.offsetMax = new Vector2(-profile.HorizontalPadding, 0f);
+            rect.offsetMin = new Vector2(profile.HorizontalPadding, profile.VerticalPadding);
+            rect.offsetMax = new Vector2(-profile.HorizontalPadding, -profile.VerticalPadding);
 
-            label.horizontalOverflow = HorizontalWrapMode.Overflow;
-            label.verticalOverflow = VerticalWrapMode.Overflow;
-            label.resizeTextForBestFit = false;
-            label.alignByGeometry = true;
-            label.fontSize = GetSingleLineFontSize(label, value, profile);
+            label.enableWordWrapping = false;
+            label.overflowMode = TextOverflowModes.Overflow;
+            label.enableAutoSizing = false;
+            label.fontSizeMin = profile.MinFontSize;
+            label.fontSizeMax = profile.MaxFontSize;
+            label.lineSpacing = 1f;
+            label.fontSize = GetFittedButtonFontSize(label, value, profile);
+            RequestTextCharacters(label, value, label.fontSize);
         }
 
         private static ButtonLabelLength ResolveButtonLabelLength(string value)
@@ -2006,13 +3576,13 @@ namespace SweetJumpJump
             switch (length)
             {
                 case ButtonLabelLength.TwoCharacters:
-                    return new ButtonLabelProfile { MaxFontSize = 32, MinFontSize = 22, HorizontalPadding = 8f };
+                    return new ButtonLabelProfile { MaxFontSize = 32, MinFontSize = 18, HorizontalPadding = 8f, VerticalPadding = 4f };
                 case ButtonLabelLength.FourCharacters:
-                    return new ButtonLabelProfile { MaxFontSize = 32, MinFontSize = 18, HorizontalPadding = 8f };
+                    return new ButtonLabelProfile { MaxFontSize = 32, MinFontSize = 14, HorizontalPadding = 8f, VerticalPadding = 4f };
                 case ButtonLabelLength.SixCharacters:
-                    return new ButtonLabelProfile { MaxFontSize = 30, MinFontSize = 14, HorizontalPadding = 6f };
+                    return new ButtonLabelProfile { MaxFontSize = 30, MinFontSize = 11, HorizontalPadding = 6f, VerticalPadding = 4f };
                 default:
-                    return new ButtonLabelProfile { MaxFontSize = 30, MinFontSize = 14, HorizontalPadding = 6f };
+                    return new ButtonLabelProfile { MaxFontSize = 30, MinFontSize = 11, HorizontalPadding = 6f, VerticalPadding = 4f };
             }
         }
 
@@ -2038,17 +3608,18 @@ namespace SweetJumpJump
             return count;
         }
 
-        private static int GetSingleLineFontSize(Text label, string value, ButtonLabelProfile profile)
+        private static int GetFittedButtonFontSize(TMP_Text label, string value, ButtonLabelProfile profile)
         {
             float availableWidth = GetAvailableLabelWidth(label);
-            if (availableWidth <= 1f || string.IsNullOrEmpty(value))
+            float availableHeight = GetAvailableLabelHeight(label);
+            if (availableWidth <= 1f || availableHeight <= 1f || string.IsNullOrEmpty(value))
             {
                 return profile.MaxFontSize;
             }
 
             for (int fontSize = profile.MaxFontSize; fontSize >= profile.MinFontSize; fontSize--)
             {
-                if (GetPreferredSingleLineWidth(label, value, fontSize) <= availableWidth)
+                if (DoesButtonTextFit(label, value, fontSize, availableWidth, availableHeight))
                 {
                     return fontSize;
                 }
@@ -2057,7 +3628,7 @@ namespace SweetJumpJump
             return profile.MinFontSize;
         }
 
-        private static float GetAvailableLabelWidth(Text label)
+        private static float GetAvailableLabelWidth(TMP_Text label)
         {
             RectTransform rect = label.rectTransform;
             float width = rect.rect.width;
@@ -2081,11 +3652,141 @@ namespace SweetJumpJump
             return Mathf.Max(0f, width);
         }
 
-        private static float GetPreferredSingleLineWidth(Text label, string value, int fontSize)
+        private static float GetAvailableLabelHeight(TMP_Text label)
+        {
+            RectTransform rect = label.rectTransform;
+            float height = rect.rect.height;
+            if (height > 1f)
+            {
+                return height;
+            }
+
+            RectTransform parentRect = rect.parent as RectTransform;
+            if (parentRect != null)
+            {
+                height = parentRect.rect.height - rect.offsetMin.y + rect.offsetMax.y;
+                if (height > 1f)
+                {
+                    return height;
+                }
+
+                height = parentRect.sizeDelta.y - rect.offsetMin.y + rect.offsetMax.y;
+            }
+
+            return Mathf.Max(0f, height);
+        }
+
+        private static bool DoesButtonTextFit(TMP_Text label, string value, int fontSize, float availableWidth, float availableHeight)
         {
             label.fontSize = fontSize;
-            TextGenerationSettings settings = label.GetGenerationSettings(new Vector2(10000f, 1000f));
-            return label.cachedTextGeneratorForLayout.GetPreferredWidth(value, settings) / label.pixelsPerUnit;
+            RequestTextCharacters(label, value, fontSize);
+            Vector2 preferred = label.GetPreferredValues(value, 10000f, availableHeight);
+            return preferred.x <= availableWidth && preferred.y <= availableHeight;
+        }
+
+        private static void RequestTextCharacters(TMP_Text label, string value, float fontSize)
+        {
+            if (label == null || label.font == null || string.IsNullOrEmpty(value))
+            {
+                return;
+            }
+
+            RequestFontCharacters(label.font, value);
+        }
+
+        private static void RequestFontCharacters(TMP_FontAsset font, string value)
+        {
+            if (font == null || string.IsNullOrEmpty(value))
+            {
+                return;
+            }
+
+            font.TryAddCharacters(value, out string _);
+        }
+
+        private static void PrewarmDefaultFont(TMP_FontAsset font)
+        {
+            RequestFontCharacters(font, CommonUiCharacterSet + LargeUiCharacterSet);
+        }
+
+        private void RefreshAllUiText()
+        {
+            if (rootCanvas == null || defaultFont == null)
+            {
+                return;
+            }
+
+            refreshingUiText = true;
+            try
+            {
+                PrewarmDefaultFont(defaultFont);
+                TMP_Text[] texts = rootCanvas.GetComponentsInChildren<TMP_Text>(true);
+                for (int i = 0; i < texts.Length; i++)
+                {
+                    TMP_Text text = texts[i];
+                    if (text == null)
+                    {
+                        continue;
+                    }
+
+                    RequestTextCharacters(text, text.text, text.fontSize);
+                    text.SetAllDirty();
+                }
+
+                ButtonLabelFitter[] fitters = rootCanvas.GetComponentsInChildren<ButtonLabelFitter>(true);
+                for (int i = 0; i < fitters.Length; i++)
+                {
+                    fitters[i].ApplyNow();
+                }
+            }
+            finally
+            {
+                refreshingUiText = false;
+            }
+
+            Canvas.ForceUpdateCanvases();
+        }
+
+        private static FontStyles ToTmpFontStyle(FontStyle style)
+        {
+            switch (style)
+            {
+                case FontStyle.Bold:
+                    return FontStyles.Bold;
+                case FontStyle.Italic:
+                    return FontStyles.Italic;
+                case FontStyle.BoldAndItalic:
+                    return FontStyles.Bold | FontStyles.Italic;
+                default:
+                    return FontStyles.Normal;
+            }
+        }
+
+        private static TextAlignmentOptions ToTmpAlignment(TextAnchor anchor)
+        {
+            switch (anchor)
+            {
+                case TextAnchor.UpperLeft:
+                    return TextAlignmentOptions.TopLeft;
+                case TextAnchor.UpperCenter:
+                    return TextAlignmentOptions.Top;
+                case TextAnchor.UpperRight:
+                    return TextAlignmentOptions.TopRight;
+                case TextAnchor.MiddleLeft:
+                    return TextAlignmentOptions.MidlineLeft;
+                case TextAnchor.MiddleCenter:
+                    return TextAlignmentOptions.Center;
+                case TextAnchor.MiddleRight:
+                    return TextAlignmentOptions.MidlineRight;
+                case TextAnchor.LowerLeft:
+                    return TextAlignmentOptions.BottomLeft;
+                case TextAnchor.LowerCenter:
+                    return TextAlignmentOptions.Bottom;
+                case TextAnchor.LowerRight:
+                    return TextAlignmentOptions.BottomRight;
+                default:
+                    return TextAlignmentOptions.Center;
+            }
         }
 
         private GameObject CreateCircleImage(string name, Transform parent, float size, Color color)
@@ -2489,7 +4190,7 @@ namespace SweetJumpJump
                 return;
             }
 
-            Text label = button.GetComponentInChildren<Text>();
+            TMP_Text label = button.GetComponentInChildren<TMP_Text>();
             if (label != null)
             {
                 label.text = value;

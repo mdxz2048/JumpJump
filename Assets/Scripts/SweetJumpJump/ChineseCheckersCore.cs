@@ -240,7 +240,8 @@ namespace SweetJumpJump
                 PromptIntervalSeconds = 30,
                 SoundEnabled = true,
                 MusicEnabled = true,
-                ThemeId = "pink"
+                ThemeId = "pink",
+                CustomMusicPath = string.Empty
             };
         }
 
@@ -548,6 +549,38 @@ namespace SweetJumpJump
         {
             PieceState piece;
             return piecesByCoord.TryGetValue(coord, out piece) ? piece : null;
+        }
+
+        public PieceState GetPieceById(int pieceId)
+        {
+            PieceState piece;
+            return piecesById.TryGetValue(pieceId, out piece) ? piece : null;
+        }
+
+        public bool TryMovePieceById(int pieceId, HexCoord target, out string message)
+        {
+            PieceState piece = GetPieceById(pieceId);
+            if (piece == null)
+            {
+                message = "没有找到要移动的棋子。";
+                return false;
+            }
+
+            if (piece.Owner != CurrentPlayerSlot)
+            {
+                message = "收到的走子不属于当前玩家。";
+                return false;
+            }
+
+            if (selectedPieceId != pieceId)
+            {
+                if (!TrySelectPiece(piece.Position, out message))
+                {
+                    return false;
+                }
+            }
+
+            return TryMoveSelectedPiece(target, out message);
         }
 
         public bool TrySelectPiece(HexCoord coord, out string message)
