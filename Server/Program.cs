@@ -1,155 +1,82 @@
 using System.Collections.Concurrent;
-using System.Net;
-using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.FileProviders;
+using SweetJumpJump.Core;
 
+const string adminPassword = "xiaozhi2048-admin";
 const int defaultPort = 53333;
-TimeSpan inactiveRoomLifetime = TimeSpan.FromMinutes(30);
+TimeSpan createRoomCooldown = TimeSpan.FromSeconds(10);
+
 int port = args.Length > 0 && int.TryParse(args[0], out int parsedPort) ? parsedPort : defaultPort;
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
-TcpListener listener = new TcpListener(IPAddress.Any, port);
-ConcurrentDictionary<string, Room> rooms = new ConcurrentDictionary<string, Room>(StringComparer.OrdinalIgnoreCase);
-ConcurrentDictionary<string, ClientPeer> clients = new ConcurrentDictionary<string, ClientPeer>(StringComparer.OrdinalIgnoreCase);
-Console.WriteLine($"SweetJumpJump TCP server listening on 0.0.0.0:{port}");
-listener.Start();
-
-_ = Task.Run(async () =>
+WebApplication app = builder.Build();
+JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web)
 {
-    while (true)
-    {
-        foreach (Room room in rooms.Values)
-        {
-            await room.RetryPendingAsync();
-        }
+    Converters = { new JsonStringEnumConverter() }
+};
 
-        await Task.Delay(250);
-    }
-});
-
-_ = Task.Run(async () =>
+ConcurrentDictionary<string, GameRoom> rooms = new(StringComparer.OrdinalIgnoreCase);
+ConcurrentDictionary<string, ClientPeer> clients = new(StringComparer.OrdinalIgnoreCase);
+ConcurrentDictionary<string, PlayerAccount> playerAccounts = new(StringComparer.OrdinalIgnoreCase);
+playerAccounts["tian"] = new PlayerAccount("tian", "tian", "tian");
+playerAccounts["mdxz"] = new PlayerAccount("mdxz", "mdxz", "mdxz");
+string webRoot = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "Web"));
+if (!Directory.Exists(webRoot))
 {
-    while (true)
-    {
-        DateTime now = DateTime.UtcNow;
-        foreach (Room room in rooms.Values)
-        {
-            if (room.Count == 0 || now - room.LastActivityUtc > inactiveRoomLifetime)
-            {
-                await ClearRoomAsync(room, "房间长时间不活跃，已自动清空。");
-            }
-        }
-
-        await Task.Delay(TimeSpan.FromSeconds(30));
-    }
-});
-
-while (true)
-{
-    TcpClient tcpClient = await listener.AcceptTcpClientAsync();
-    _ = Task.Run(() => HandleClientAsync(new ClientPeer(tcpClient)));
+    webRoot = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "Web"));
 }
+
+app.UseWebSockets();
+if (Directory.Exists(webRoot))
+{
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = new PhysicalFileProvider(webRoot) });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = new PhysicalFileProvider(webRoot) });
+}
+
+app.Map("/ws", async context =>
+{
+    if (!context.WebSockets.IsWebSocketRequest)
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        return;
+    }
+
+    using WebSocket socket = await context.WebSockets.AcceptWebSocketAsync();
+    ClientPeer peer = new(socket);
+    clients[peer.Id] = peer;
+    await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("WELCOME") { ClientId = peer.Id }, jsonOptions);
+    await HandleClientAsync(peer);
+});
+
+app.MapGet("/health", () => Results.Ok(new { ok = true, service = "SweetJumpJumpServer" }));
+Console.WriteLine($"SweetJumpJump WebSocket server listening on http://0.0.0.0:{port}");
+await app.RunAsync();
 
 async Task HandleClientAsync(ClientPeer peer)
 {
-    clients[peer.Id] = peer;
-    Console.WriteLine($"client connected: {peer.Id}");
-    await peer.SendAsync(new { type = "WELCOME", clientId = peer.Id });
-    await SendDiscoveriesAsync(peer);
-
+    byte[] buffer = new byte[32 * 1024];
     try
     {
-        while (true)
+        while (peer.Socket.State == WebSocketState.Open)
         {
-            string? line = await peer.Reader.ReadLineAsync();
-            if (line == null)
+            string? json = await ReceiveTextAsync(peer.Socket, buffer);
+            if (json == null)
             {
                 break;
             }
 
-            using JsonDocument document = JsonDocument.Parse(line);
-            JsonElement root = document.RootElement;
-            string type = GetString(root, "type").ToUpperInvariant();
-
-            if (type == "CLIENT_ACK")
-            {
-                peer.Room?.Acknowledge(peer.Id, GetString(root, "ackId"));
-                continue;
-            }
-
-            await AcknowledgeCommandAsync(peer, root);
-            if (!peer.MarkCommandIfNew(GetString(root, "messageId")))
+            ClientCommand? command = JsonSerializer.Deserialize<ClientCommand>(json, jsonOptions);
+            if (command == null || string.IsNullOrWhiteSpace(command.Type))
             {
                 continue;
             }
 
-            switch (type)
-            {
-                case "AUTH":
-                    peer.PlayerToken = GetString(root, "playerToken");
-                    peer.PlayerName = NormalizePlayerName(GetString(root, "playerName"), peer.Id);
-                    break;
-                case "CREATE":
-                    peer.PlayerToken = string.IsNullOrWhiteSpace(peer.PlayerToken) ? GetString(root, "playerToken") : peer.PlayerToken;
-                    peer.PlayerName = NormalizePlayerName(GetString(root, "playerName"), peer.Id);
-                    await CreateRoomAsync(peer);
-                    break;
-                case "REJOIN":
-                    await RejoinRoomAsync(peer, GetString(root, "roomKey"), GetString(root, "playerToken"), GetString(root, "playerName"), GetInt(root, "lastActionSeq"));
-                    break;
-                case "JOIN":
-                    await JoinRoomAsync(peer, GetString(root, "roomKey"));
-                    break;
-                case "JOIN_REQUEST":
-                    peer.PlayerToken = string.IsNullOrWhiteSpace(peer.PlayerToken) ? GetString(root, "playerToken") : peer.PlayerToken;
-                    await RequestJoinRoomAsync(peer, GetString(root, "roomKey"), GetString(root, "playerName"));
-                    break;
-                case "JOIN_APPROVE":
-                    await ApproveJoinRoomAsync(peer, GetString(root, "requestClientId"));
-                    break;
-                case "JOIN_REJECT":
-                    await RejectJoinRoomAsync(peer, GetString(root, "requestClientId"));
-                    break;
-                case "READY":
-                    await SetReadyAsync(peer, GetBool(root, "ok"));
-                    break;
-                case "SET_AI":
-                    await SetAiAsync(peer, GetString(root, "slot"), GetBool(root, "ok"));
-                    break;
-                case "START":
-                    await StartRoomAsync(peer);
-                    break;
-                case "SELECT":
-                    await BroadcastActionAsync(peer, new
-                    {
-                        type = "SELECT",
-                        roomKey = peer.Room?.Key ?? string.Empty,
-                        clientId = peer.Id,
-                        pieceId = GetInt(root, "pieceId"),
-                        q = GetInt(root, "q"),
-                        r = GetInt(root, "r"),
-                        ok = GetBool(root, "ok"),
-                        message = GetString(root, "message")
-                    });
-                    break;
-                case "MOVE":
-                    await BroadcastActionAsync(peer, new
-                    {
-                        type = "MOVE",
-                        roomKey = peer.Room?.Key ?? string.Empty,
-                        clientId = peer.Id,
-                        pieceId = GetInt(root, "pieceId"),
-                        q = GetInt(root, "q"),
-                        r = GetInt(root, "r")
-                    });
-                    break;
-                case "FINISH":
-                    await BroadcastActionAsync(peer, new { type = "FINISH", roomKey = peer.Room?.Key ?? string.Empty, clientId = peer.Id });
-                    break;
-                case "PASS":
-                    await BroadcastActionAsync(peer, new { type = "PASS", roomKey = peer.Room?.Key ?? string.Empty, clientId = peer.Id });
-                    break;
-            }
+            await HandleCommandAsync(peer, command);
         }
     }
     catch (Exception exception)
@@ -159,24 +86,266 @@ async Task HandleClientAsync(ClientPeer peer)
     finally
     {
         clients.TryRemove(peer.Id, out _);
-        await MarkDisconnectedAsync(peer);
-        peer.Dispose();
-        Console.WriteLine($"client disconnected: {peer.Id}");
+        GameRoom? room = peer.Room;
+        if (room != null)
+        {
+            await room.RemovePeerAsync(peer, jsonOptions);
+            if (room.IsEmpty)
+            {
+                rooms.TryRemove(room.Key, out _);
+            }
+            await SendRoomListToAllAsync();
+        }
     }
 }
 
-async Task AcknowledgeCommandAsync(ClientPeer peer, JsonElement root)
+async Task HandleCommandAsync(ClientPeer peer, ClientCommand command)
 {
-    string messageId = GetString(root, "messageId");
-    if (!string.IsNullOrEmpty(messageId))
+    string type = command.Type.ToUpperInvariant();
+    if (type == "AUTH")
     {
-        await peer.SendAsync(new { type = "ACK", ackId = messageId });
+        string account = command.Account.Trim();
+        if (string.IsNullOrWhiteSpace(account) || !playerAccounts.TryGetValue(account, out PlayerAccount? playerAccount) || playerAccount.Password != command.Password)
+        {
+            await SendErrorAsync(peer, "账号或密码不正确。");
+            return;
+        }
+
+        if (playerAccount.Disabled)
+        {
+            await SendErrorAsync(peer, "账号已被禁用，请联系管理员。");
+            return;
+        }
+
+        if (clients.Values.Any(value => value.Id != peer.Id && value.Authenticated && !value.IsAdmin && value.Account.Equals(account, StringComparison.OrdinalIgnoreCase) && value.Socket.State == WebSocketState.Open))
+        {
+            await SendErrorAsync(peer, "这个账号已经在其他网页登录。");
+            return;
+        }
+
+        peer.Authenticated = true;
+        peer.Account = account;
+        peer.Name = NormalizeName(playerAccount.DisplayName, account);
+        await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("AUTH_OK") { ClientId = peer.Id, Account = peer.Account, Name = peer.Name, Message = "进入成功。" }, jsonOptions);
+        await SendRoomListAsync(peer);
+        return;
+    }
+
+    if (type == "ADMIN_AUTH")
+    {
+        if (command.Password != adminPassword)
+        {
+            await SendErrorAsync(peer, "管理员密钥不正确。");
+            return;
+        }
+
+        peer.Authenticated = true;
+        peer.IsAdmin = true;
+        peer.Name = NormalizeName(command.Name, "管理员");
+        await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ADMIN_OK") { ClientId = peer.Id, Message = "管理员已进入。" }, jsonOptions);
+        await SendAdminSnapshotAsync(peer);
+        return;
+    }
+
+    if (!peer.Authenticated)
+    {
+        await SendErrorAsync(peer, "请先输入访问密码。");
+        return;
+    }
+
+    switch (type)
+    {
+        case "CREATE":
+            await CreateRoomAsync(peer, command);
+            break;
+        case "JOIN":
+            await JoinRoomAsync(peer, command.RoomKey);
+            break;
+        case "LIST":
+            await SendRoomListAsync(peer);
+            break;
+        case "ADMIN_SNAPSHOT":
+            await SendAdminSnapshotAsync(peer);
+            break;
+        case "ADD_PLAYER":
+            await AddPlayerAsync(peer, command);
+            break;
+        case "REMOVE_PLAYER":
+            await RemovePlayerAsync(peer, command);
+            break;
+        case "DISABLE_PLAYER":
+            await DisablePlayerAsync(peer, command);
+            break;
+        case "ENABLE_PLAYER":
+            await EnablePlayerAsync(peer, command);
+            break;
+        case "SELECT_SLOT":
+            await RequireRoom(peer, room => room.SelectSlotAsync(peer, command.Slot, jsonOptions));
+            break;
+        case "UPDATE_NICKNAME":
+            await UpdateNicknameAsync(peer, command.Name);
+            break;
+        case "START":
+            await RequireRoom(peer, room => room.StartAsync(peer, jsonOptions));
+            break;
+        case "SELECT":
+            await RequireRoom(peer, room => room.SelectAsync(peer, command.PieceId, jsonOptions));
+            break;
+        case "MOVE":
+            await RequireRoom(peer, room => room.MoveAsync(peer, command.PieceId, new HexCoord(command.Q, command.R), jsonOptions));
+            break;
+        case "FINISH":
+            await RequireRoom(peer, room => room.FinishAsync(peer, jsonOptions));
+            break;
+        case "PASS":
+            await RequireRoom(peer, room => room.PassAsync(peer, jsonOptions));
+            break;
+        default:
+            await SendErrorAsync(peer, "未知指令。");
+            break;
     }
 }
 
-async Task CreateRoomAsync(ClientPeer peer)
+async Task RemovePlayerAsync(ClientPeer peer, ClientCommand command)
 {
-    await RemoveFromRoomAsync(peer);
+    if (!peer.IsAdmin)
+    {
+        await SendErrorAsync(peer, "需要管理员权限。");
+        return;
+    }
+
+    string account = command.Account.Trim();
+    if (!playerAccounts.TryRemove(account, out _))
+    {
+        await SendErrorAsync(peer, "账号不存在。");
+        return;
+    }
+
+    // Kick any connected session for this account
+    foreach (ClientPeer target in clients.Values.Where(c => c.Account.Equals(account, StringComparison.OrdinalIgnoreCase) && c.Socket.State == WebSocketState.Open))
+    {
+        await SocketJson.SendAsync(target.Socket, new ServerEnvelope("ERROR") { Message = "你的账号已被管理员删除。" }, jsonOptions);
+        await target.Socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "account removed", CancellationToken.None);
+    }
+
+    await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ADMIN_NOTICE") { Message = $"已删除账号 {account}。" }, jsonOptions);
+    await SendAdminSnapshotAsync(peer);
+}
+
+async Task DisablePlayerAsync(ClientPeer peer, ClientCommand command)
+{
+    if (!peer.IsAdmin)
+    {
+        await SendErrorAsync(peer, "需要管理员权限。");
+        return;
+    }
+
+    string account = command.Account.Trim();
+    if (!playerAccounts.TryGetValue(account, out PlayerAccount? playerAccount))
+    {
+        await SendErrorAsync(peer, "账号不存在。");
+        return;
+    }
+
+    playerAccount.Disabled = true;
+
+    // Kick active sessions for this account
+    foreach (ClientPeer target in clients.Values.Where(c => c.Account.Equals(account, StringComparison.OrdinalIgnoreCase) && c.Socket.State == WebSocketState.Open))
+    {
+        await SocketJson.SendAsync(target.Socket, new ServerEnvelope("ERROR") { Message = "你的账号已被管理员禁用。" }, jsonOptions);
+        await target.Socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "account disabled", CancellationToken.None);
+    }
+
+    await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ADMIN_NOTICE") { Message = $"已禁用账号 {account}。" }, jsonOptions);
+    await SendAdminSnapshotAsync(peer);
+}
+
+async Task EnablePlayerAsync(ClientPeer peer, ClientCommand command)
+{
+    if (!peer.IsAdmin)
+    {
+        await SendErrorAsync(peer, "需要管理员权限。");
+        return;
+    }
+
+    string account = command.Account.Trim();
+    if (!playerAccounts.TryGetValue(account, out PlayerAccount? playerAccount))
+    {
+        await SendErrorAsync(peer, "账号不存在。");
+        return;
+    }
+
+    playerAccount.Disabled = false;
+    await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ADMIN_NOTICE") { Message = $"已启用账号 {account}。" }, jsonOptions);
+    await SendAdminSnapshotAsync(peer);
+}
+
+async Task AddPlayerAsync(ClientPeer peer, ClientCommand command)
+{
+    if (!peer.IsAdmin)
+    {
+        await SendErrorAsync(peer, "需要管理员权限。");
+        return;
+    }
+
+    string account = command.Account.Trim();
+    string password = command.Password.Trim();
+    if (string.IsNullOrWhiteSpace(account) || string.IsNullOrWhiteSpace(password))
+    {
+        await SendErrorAsync(peer, "账号和密码不能为空。");
+        return;
+    }
+
+    if (!playerAccounts.TryAdd(account, new PlayerAccount(account, password, NormalizeName(command.Name, account))))
+    {
+        await SendErrorAsync(peer, "账号已存在。");
+        return;
+    }
+
+    await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ADMIN_NOTICE") { Message = $"已新增棋手 {account}。" }, jsonOptions);
+    await SendAdminSnapshotAsync(peer);
+}
+
+async Task UpdateNicknameAsync(ClientPeer peer, string name)
+{
+    if (peer.IsAdmin)
+    {
+        await SendErrorAsync(peer, "管理员不参与棋手昵称设置。");
+        return;
+    }
+
+    peer.Name = NormalizeName(name, peer.Account);
+    if (!string.IsNullOrEmpty(peer.Account) && playerAccounts.TryGetValue(peer.Account, out PlayerAccount? account))
+    {
+        account.DisplayName = peer.Name;
+    }
+
+    if (peer.Room != null)
+    {
+        await peer.Room.UpdatePeerNameAsync(peer, jsonOptions);
+    }
+
+    await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("PROFILE") { Account = peer.Account, Name = peer.Name, Message = "昵称已更新。" }, jsonOptions);
+    await SendRoomListToAllAsync();
+}
+
+async Task CreateRoomAsync(ClientPeer peer, ClientCommand command)
+{
+    if (peer.Room != null && !peer.Room.Started)
+    {
+        await SendErrorAsync(peer, "你已经在一个未开始的房间里。");
+        return;
+    }
+
+    DateTime now = DateTime.UtcNow;
+    if (now - peer.LastRoomCreatedAtUtc < createRoomCooldown)
+    {
+        int seconds = Math.Max(1, (int)Math.Ceiling((createRoomCooldown - (now - peer.LastRoomCreatedAtUtc)).TotalSeconds));
+        await SendErrorAsync(peer, $"创建太频繁，请 {seconds} 秒后再试。");
+        return;
+    }
+
+    await LeaveCurrentRoomAsync(peer);
     string key;
     do
     {
@@ -184,690 +353,472 @@ async Task CreateRoomAsync(ClientPeer peer)
     }
     while (rooms.ContainsKey(key));
 
-    peer.PlayerName = NormalizePlayerName(peer.PlayerName, peer.Id);
-    Room room = new Room(key, peer.Id);
+    GameRoom room = new(key, string.IsNullOrWhiteSpace(command.RuleVariant) ? RuleVariant.OnePieceJump : Enum.Parse<RuleVariant>(command.RuleVariant, true));
     rooms[key] = room;
-    room.Add(peer);
-    await SendRoomAssignedAsync(peer, room);
-    await BroadcastLobbyAsync(room);
-    await BroadcastDiscoveriesAsync();
+    peer.LastRoomCreatedAtUtc = now;
+    await room.AddPeerAsync(peer, jsonOptions);
+    await room.BroadcastLobbyAsync(jsonOptions);
+    await SendRoomListToAllAsync();
 }
 
-async Task JoinRoomAsync(ClientPeer peer, string key)
+async Task JoinRoomAsync(ClientPeer peer, string roomKey)
 {
-    await RemoveFromRoomAsync(peer);
-    if (!rooms.TryGetValue(key, out Room? room))
+    if (string.IsNullOrWhiteSpace(roomKey) || !rooms.TryGetValue(roomKey.Trim(), out GameRoom? room))
     {
-        await peer.SendAsync(new { type = "ERROR", message = "房间不存在。" });
+        await SendErrorAsync(peer, "房间不存在。");
         return;
     }
 
-    if (!room.Add(peer))
+    await LeaveCurrentRoomAsync(peer);
+    if (!await room.AddPeerAsync(peer, jsonOptions))
     {
-        await peer.SendAsync(new { type = "ERROR", message = "房间已满。" });
+        await SendErrorAsync(peer, "房间已满或已经开始。");
         return;
     }
 
-    await SendRoomAssignedAsync(peer, room);
-    await BroadcastLobbyAsync(room);
-    await BroadcastDiscoveriesAsync();
+    await room.BroadcastLobbyAsync(jsonOptions);
+    await SendRoomListToAllAsync();
 }
 
-async Task RequestJoinRoomAsync(ClientPeer peer, string key, string playerName)
+async Task LeaveCurrentRoomAsync(ClientPeer peer)
 {
-    if (peer.Room != null)
-    {
-        await peer.SendAsync(new { type = "ERROR", message = "你已经在房间里。" });
-        return;
-    }
-
-    if (!rooms.TryGetValue(key, out Room? room))
-    {
-        await peer.SendAsync(new { type = "ERROR", message = "房间不存在。" });
-        await SendDiscoveriesAsync(peer);
-        return;
-    }
-
-    ClientPeer? host = room.HostPeer();
-    if (host == null)
-    {
-        await peer.SendAsync(new { type = "ERROR", message = "房主不在线。" });
-        return;
-    }
-
-    peer.PlayerName = NormalizePlayerName(playerName, peer.Id);
-    room.Touch();
-    room.AddJoinRequest(peer);
-    await peer.SendAsync(new { type = "JOIN_PENDING", roomKey = room.Key, message = "已发送加入申请，等待房主同意。" });
-    await host.SendAsync(new
-    {
-        type = "JOIN_REQUEST",
-        roomKey = room.Key,
-        requestClientId = peer.Id,
-        requestPlayerName = peer.PlayerName,
-        message = $"{peer.PlayerName} 想加入房间。"
-    });
-}
-
-async Task RejoinRoomAsync(ClientPeer peer, string key, string playerToken, string playerName, int lastActionSeq)
-{
-    if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(playerToken))
-    {
-        return;
-    }
-
-    if (!rooms.TryGetValue(key, out Room? room))
-    {
-        await peer.SendAsync(new { type = "ROOM_CLEARED", message = "房间已经不存在。" });
-        return;
-    }
-
-    if (!room.Reconnect(peer, playerToken, NormalizePlayerName(playerName, peer.Id)))
-    {
-        await peer.SendAsync(new { type = "ERROR", message = "无法恢复座位，请重新加入房间。" });
-        return;
-    }
-
-    await SendRoomAssignedAsync(peer, room);
-    await BroadcastLobbyAsync(room);
-    foreach (object action in room.ActionsAfter(lastActionSeq))
-    {
-        await peer.SendAsync(action);
-    }
-}
-
-async Task ApproveJoinRoomAsync(ClientPeer hostPeer, string requestClientId)
-{
-    Room? room = hostPeer.Room;
+    GameRoom? room = peer.Room;
     if (room == null)
     {
         return;
     }
 
-    if (room.HostId != hostPeer.Id)
-    {
-        await hostPeer.SendAsync(new { type = "ERROR", message = "只有房主可以同意加入。" });
-        return;
-    }
-
-    ClientPeer? requester = room.TakeJoinRequest(requestClientId);
-    if (requester == null || !clients.ContainsKey(requester.Id))
-    {
-        await hostPeer.SendAsync(new { type = "ERROR", message = "申请人已经离线。" });
-        return;
-    }
-
-    await RemoveFromRoomAsync(requester);
-    if (!room.Add(requester))
-    {
-        await requester.SendAsync(new { type = "ERROR", message = "房间已满。" });
-        await hostPeer.SendAsync(new { type = "ERROR", message = "房间已满，无法加入。" });
-        return;
-    }
-
-    await SendRoomAssignedAsync(requester, room);
-    await BroadcastLobbyAsync(room);
-    await BroadcastDiscoveriesAsync();
-}
-
-async Task RejectJoinRoomAsync(ClientPeer hostPeer, string requestClientId)
-{
-    Room? room = hostPeer.Room;
-    if (room == null)
-    {
-        return;
-    }
-
-    if (room.HostId != hostPeer.Id)
-    {
-        await hostPeer.SendAsync(new { type = "ERROR", message = "只有房主可以拒绝加入。" });
-        return;
-    }
-
-    ClientPeer? requester = room.TakeJoinRequest(requestClientId);
-    if (requester != null && clients.ContainsKey(requester.Id))
-    {
-        await requester.SendAsync(new { type = "JOIN_REJECTED", roomKey = room.Key, message = "房主拒绝了加入申请。" });
-    }
-}
-
-async Task SetReadyAsync(ClientPeer peer, bool ready)
-{
-    if (peer.Room == null)
-    {
-        return;
-    }
-
-    peer.Ready = ready;
-    await BroadcastLobbyAsync(peer.Room);
-}
-
-async Task SetAiAsync(ClientPeer peer, string slot, bool enabled)
-{
-    Room? room = peer.Room;
-    if (room == null)
-    {
-        return;
-    }
-
-    if (room.HostId != peer.Id)
-    {
-        await peer.SendAsync(new { type = "ERROR", message = "只有房主可以设置人机位置。" });
-        return;
-    }
-
-    room.SetAi(slot, enabled);
-    await BroadcastLobbyAsync(room);
-}
-
-async Task StartRoomAsync(ClientPeer peer)
-{
-    Room? room = peer.Room;
-    if (room == null)
-    {
-        return;
-    }
-
-    if (room.HostId != peer.Id)
-    {
-        await peer.SendAsync(new { type = "ERROR", message = "只有房主可以开始。" });
-        return;
-    }
-
-    ClientPeer[] peers = room.ConnectedPeersSnapshot();
-    if (peers.Length < 1)
-    {
-        await peer.SendAsync(new { type = "ERROR", message = "至少需要 1 位玩家。" });
-        return;
-    }
-
-    if (peers.Any(value => !value.Ready))
-    {
-        await peer.SendAsync(new { type = "ERROR", message = "还有玩家没有准备。" });
-        return;
-    }
-
-    string slots = string.Join(",", peers.Select(value => value.Slot));
-    string aiSlots = string.Join(",", room.AiSlotsSnapshot());
-    room.ClearActionLog();
-    await room.BroadcastReliableAsync(new { type = "START", roomKey = room.Key, slots, aiSlots });
-}
-
-async Task BroadcastActionAsync(ClientPeer peer, object message)
-{
-    if (peer.Room == null)
-    {
-        return;
-    }
-
-    await peer.Room.BroadcastActionReliableAsync(message);
-}
-
-async Task SendRoomAssignedAsync(ClientPeer peer, Room room)
-{
-    await peer.SendAsync(new
-    {
-        type = "ROOM",
-        roomKey = room.Key,
-        clientId = peer.Id,
-        hostId = room.HostId,
-        slot = peer.Slot,
-        aiSlots = string.Join(",", room.AiSlotsSnapshot()),
-        lastActionSeq = room.LastActionSeq,
-        message = room.Summary()
-    });
-}
-
-async Task BroadcastLobbyAsync(Room room)
-{
-    await room.BroadcastReliableAsync(new
-    {
-        type = "LOBBY",
-        roomKey = room.Key,
-        hostId = room.HostId,
-        count = room.Count,
-        aiSlots = string.Join(",", room.AiSlotsSnapshot()),
-        message = room.Summary()
-    });
-}
-
-async Task RemoveFromRoomAsync(ClientPeer peer)
-{
-    Room? room = peer.Room;
-    if (room == null)
-    {
-        return;
-    }
-
-    room.Remove(peer);
-    peer.Room = null;
-    peer.Ready = false;
-
-    if (room.Count == 0)
+    await room.RemovePeerAsync(peer, jsonOptions);
+    if (room.IsEmpty)
     {
         rooms.TryRemove(room.Key, out _);
     }
-    else
-    {
-        room.EnsureHost();
-        await BroadcastLobbyAsync(room);
-    }
-
-    await BroadcastDiscoveriesAsync();
 }
 
-async Task MarkDisconnectedAsync(ClientPeer peer)
+async Task RequireRoom(ClientPeer peer, Func<GameRoom, Task> action)
 {
-    Room? room = peer.Room;
-    if (room == null)
+    if (peer.Room == null)
     {
+        await SendErrorAsync(peer, "你还没有加入房间。");
         return;
     }
 
-    room.MarkDisconnected(peer);
-    await BroadcastLobbyAsync(room);
-    await BroadcastDiscoveriesAsync();
+    await action(peer.Room);
 }
 
-async Task BroadcastDiscoveriesAsync()
+async Task SendRoomListAsync(ClientPeer peer)
 {
-    foreach (ClientPeer peer in clients.Values)
+    List<RoomSummary> summaries = rooms.Values
+        .Where(room => !room.Started)
+        .Select(room => room.ToSummary())
+        .OrderBy(summary => summary.RoomKey)
+        .ToList();
+    await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ROOM_LIST") { Rooms = summaries }, jsonOptions);
+}
+
+async Task SendRoomListToAllAsync()
+{
+    foreach (ClientPeer peer in clients.Values.Where(peer => peer.Authenticated && peer.Socket.State == WebSocketState.Open))
     {
-        if (peer.Room == null)
+        await SendRoomListAsync(peer);
+    }
+}
+
+async Task SendAdminSnapshotAsync(ClientPeer peer)
+{
+    if (!peer.IsAdmin)
+    {
+        await SendErrorAsync(peer, "需要管理员权限。");
+        return;
+    }
+
+    List<MemberSummary> members = clients.Values
+        .Where(value => value.Authenticated)
+        .OrderBy(value => value.Name)
+        .Select(value => new MemberSummary
         {
-            try
-            {
-                await SendDiscoveriesAsync(peer);
-            }
-            catch
-            {
-            }
-        }
-    }
+            ClientId = value.Id,
+            Account = value.Account,
+            Name = value.Name,
+            RoomKey = value.Room?.Key ?? string.Empty,
+            Slot = value.Slot,
+            IsAdmin = value.IsAdmin,
+            IsHost = value.Room != null && value.Room.IsHost(value)
+        })
+        .ToList();
+
+    List<AccountSummary> accounts = playerAccounts.Values
+        .OrderBy(value => value.Account)
+        .Select(value => new AccountSummary
+        {
+            Account = value.Account,
+            Name = value.DisplayName,
+            Disabled = value.Disabled,
+            Online = clients.Values.Any(peer => peer.Authenticated && !peer.IsAdmin && peer.Account.Equals(value.Account, StringComparison.OrdinalIgnoreCase) && peer.Socket.State == WebSocketState.Open)
+        })
+        .ToList();
+
+    List<RoomSummary> roomSummaries = rooms.Values
+        .Select(room => room.ToSummary())
+        .OrderBy(room => room.RoomKey)
+        .ToList();
+
+    await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ADMIN_SNAPSHOT") { Members = members, Rooms = roomSummaries, Accounts = accounts }, jsonOptions);
 }
 
-async Task SendDiscoveriesAsync(ClientPeer peer)
+Task SendErrorAsync(ClientPeer peer, string message)
 {
-    Room[] openRooms = rooms.Values
-        .Where(room => room.CanDiscover)
-        .OrderByDescending(room => room.LastActivityUtc)
-        .Take(6)
-        .ToArray();
-
-    string roomKeys = string.Join(",", openRooms.Select(room => room.Key));
-    string summaries = string.Join("\n\n", openRooms.Select(room => $"房间 {room.Key} · {room.Count}/6 人\n{room.Summary()}"));
-    await peer.SendAsync(new
-    {
-        type = "DISCOVER",
-        roomKey = openRooms.Length > 0 ? openRooms[0].Key : string.Empty,
-        count = openRooms.Length,
-        slots = roomKeys,
-        message = summaries
-    });
+    return SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ERROR") { Message = message }, jsonOptions);
 }
 
-async Task ClearRoomAsync(Room room, string message)
-{
-    if (!rooms.TryRemove(room.Key, out _))
-    {
-        return;
-    }
-
-    foreach (ClientPeer peer in room.ConnectedPeersSnapshot())
-    {
-        peer.Room = null;
-        peer.Ready = false;
-        await peer.SendAsync(new { type = "ROOM_CLEARED", message });
-    }
-
-    room.ClearJoinRequests();
-    await BroadcastDiscoveriesAsync();
-}
-
-static string GetString(JsonElement root, string name)
-{
-    return root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String
-        ? value.GetString() ?? string.Empty
-        : string.Empty;
-}
-
-static bool GetBool(JsonElement root, string name)
-{
-    return root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.True;
-}
-
-static int GetInt(JsonElement root, string name)
-{
-    return root.TryGetProperty(name, out JsonElement value) && value.TryGetInt32(out int result) ? result : 0;
-}
-
-static string NormalizePlayerName(string value, string fallback)
+static string NormalizeName(string value, string fallback)
 {
     string name = string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
     return name.Length > 14 ? name[..14] : name;
 }
 
-sealed class ClientPeer : IDisposable
+static async Task<string?> ReceiveTextAsync(WebSocket socket, byte[] buffer)
 {
-    private readonly TcpClient tcpClient;
-    private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
-    private readonly StreamWriter writer;
-
-    public ClientPeer(TcpClient tcpClient)
+    StringBuilder builder = new();
+    while (true)
     {
-        this.tcpClient = tcpClient;
-        tcpClient.NoDelay = true;
-        NetworkStream stream = tcpClient.GetStream();
-        Reader = new StreamReader(stream, Encoding.UTF8);
-        writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+        WebSocketReceiveResult result = await socket.ReceiveAsync(buffer, CancellationToken.None);
+        if (result.MessageType == WebSocketMessageType.Close)
+        {
+            return null;
+        }
+
+        builder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+        if (result.EndOfMessage)
+        {
+            return builder.ToString();
+        }
+    }
+}
+
+sealed class ClientPeer
+{
+    public ClientPeer(WebSocket socket)
+    {
+        Socket = socket;
         Id = Guid.NewGuid().ToString("N")[..8];
     }
 
     public string Id { get; }
-    public StreamReader Reader { get; }
-    public Room? Room { get; set; }
-    public string Slot { get; set; } = string.Empty;
-    public string PlayerToken { get; set; } = string.Empty;
-    public string PlayerName { get; set; } = string.Empty;
-    public bool Ready { get; set; }
-    public bool Connected { get; set; } = true;
-    public DateTime DisconnectedAtUtc { get; set; } = DateTime.MinValue;
-
-    private readonly HashSet<string> handledCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-    public bool MarkCommandIfNew(string messageId)
-    {
-        if (string.IsNullOrEmpty(messageId))
-        {
-            return true;
-        }
-
-        lock (handledCommands)
-        {
-            if (handledCommands.Contains(messageId))
-            {
-                return false;
-            }
-
-            handledCommands.Add(messageId);
-            return true;
-        }
-    }
-
-    public async Task SendAsync(object message)
-    {
-        string json = JsonSerializer.Serialize(message);
-        await sendLock.WaitAsync();
-        try
-        {
-            await writer.WriteLineAsync(json);
-        }
-        finally
-        {
-            sendLock.Release();
-        }
-    }
-
-    public void Dispose()
-    {
-        tcpClient.Dispose();
-        sendLock.Dispose();
-    }
+    public WebSocket Socket { get; }
+    public string Account { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public bool Authenticated { get; set; }
+    public bool IsAdmin { get; set; }
+    public SlotId? Slot { get; set; }
+    public GameRoom? Room { get; set; }
+    public DateTime LastRoomCreatedAtUtc { get; set; } = DateTime.MinValue;
 }
 
-sealed class Room
+sealed class GameRoom
 {
-    private sealed class ReliableEnvelope
+    private static readonly SlotId[] SlotOrder =
     {
-        public string MessageId = string.Empty;
-        public object Message = new();
-        public HashSet<string> PendingClientIds = new HashSet<string>();
-        public DateTime LastSentAtUtc = DateTime.MinValue;
-        public int Attempts;
-    }
-
-    private sealed class ActionLogEntry
-    {
-        public int Seq;
-        public object Message = new();
-    }
-
-    private static readonly string[] SlotOrder =
-    {
-        "Bottom",
-        "Top",
-        "BottomLeft",
-        "TopRight",
-        "TopLeft",
-        "BottomRight"
+        SlotId.Bottom,
+        SlotId.Top,
+        SlotId.BottomLeft,
+        SlotId.TopRight,
+        SlotId.TopLeft,
+        SlotId.BottomRight
     };
 
-    private readonly object gate = new object();
-    private readonly List<ClientPeer> peers = new List<ClientPeer>();
-    private readonly HashSet<string> aiSlots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, ClientPeer> joinRequests = new Dictionary<string, ClientPeer>(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, ReliableEnvelope> pendingReliable = new Dictionary<string, ReliableEnvelope>();
-    private readonly List<ActionLogEntry> actionLog = new List<ActionLogEntry>();
-    private int nextBroadcastId = 1;
-    private int nextActionSeq = 1;
+    private readonly object gate = new();
+    private readonly List<ClientPeer> peers = new();
+    private readonly Dictionary<SlotId, string> playerNames = new();
+    private readonly RuleVariant ruleVariant;
+    private string hostClientId = string.Empty;
+    private GameSession? session;
+    private int version;
 
-    public Room(string key, string hostId)
+    public GameRoom(string key, RuleVariant ruleVariant)
     {
         Key = key;
-        HostId = hostId;
-        foreach (string slot in SlotOrder)
-        {
-            aiSlots.Add(slot);
-        }
+        this.ruleVariant = ruleVariant;
     }
 
     public string Key { get; }
-    public string HostId { get; private set; }
-    public DateTime LastActivityUtc { get; private set; } = DateTime.UtcNow;
-    public int LastActionSeq
+    public bool Started
     {
         get
         {
             lock (gate)
             {
-                return nextActionSeq - 1;
+                return session != null;
             }
         }
     }
 
-    public int Count
+    public bool IsEmpty
     {
         get
         {
             lock (gate)
             {
-                return peers.Count;
+                return peers.Count == 0;
             }
         }
     }
 
-    public bool CanDiscover
+    public async Task SelectSlotAsync(ClientPeer peer, string slotName, JsonSerializerOptions jsonOptions)
     {
-        get
+        if (!Enum.TryParse<SlotId>(slotName, ignoreCase: true, out SlotId slot))
         {
-            lock (gate)
-            {
-                peers.RemoveAll(value => !value.Connected && IsSeatExpired(value));
-                return peers.Any(value => value.Connected) && peers.Count < SlotOrder.Length;
-            }
+            await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ERROR") { Message = "无效的位置。" }, jsonOptions);
+            return;
         }
-    }
 
-    public void Touch()
-    {
+        ServerEnvelope? notification = null;
+        ServerEnvelope? error = null;
         lock (gate)
         {
-            LastActivityUtc = DateTime.UtcNow;
-        }
-    }
-
-    public bool Add(ClientPeer peer)
-    {
-        lock (gate)
-        {
-            string? slot = SlotOrder.FirstOrDefault(value => peers.All(peerValue => peerValue.Slot != value || !peerValue.Connected && IsSeatExpired(peerValue)));
-            if (slot == null)
+            if (session != null)
             {
-                return false;
+                error = new ServerEnvelope("ERROR") { Message = "棋局已开始，不能切换位置。" };
             }
-
-            peers.RemoveAll(value => !value.Connected && IsSeatExpired(value));
-            peer.Room = this;
-            peer.Slot = slot;
-            peer.Ready = false;
-            peer.Connected = true;
-            peer.DisconnectedAtUtc = DateTime.MinValue;
-            aiSlots.Remove(slot);
-            peers.Add(peer);
-            joinRequests.Remove(peer.Id);
-            LastActivityUtc = DateTime.UtcNow;
-            return true;
-        }
-    }
-
-    public void Remove(ClientPeer peer)
-    {
-        lock (gate)
-        {
-            peers.Remove(peer);
-            if (!string.IsNullOrEmpty(peer.Slot))
+            else if (peers.Any(p => p.Slot == slot && p.Id != peer.Id))
             {
-                aiSlots.Add(peer.Slot);
-            }
-            joinRequests.Remove(peer.Id);
-            LastActivityUtc = DateTime.UtcNow;
-        }
-    }
-
-    public void MarkDisconnected(ClientPeer peer)
-    {
-        lock (gate)
-        {
-            ClientPeer? seat = peers.FirstOrDefault(value => value.Id == peer.Id);
-            if (seat == null)
-            {
-                return;
-            }
-
-            seat.Connected = false;
-            seat.DisconnectedAtUtc = DateTime.UtcNow;
-            LastActivityUtc = DateTime.UtcNow;
-        }
-    }
-
-    public bool Reconnect(ClientPeer peer, string playerToken, string playerName)
-    {
-        lock (gate)
-        {
-            ClientPeer? oldPeer = peers.FirstOrDefault(value => !value.Connected && value.PlayerToken == playerToken && !IsSeatExpired(value));
-            if (oldPeer == null)
-            {
-                return false;
-            }
-
-            string slot = oldPeer.Slot;
-            bool ready = oldPeer.Ready;
-            peers.Remove(oldPeer);
-            peer.Room = this;
-            peer.Slot = slot;
-            peer.Ready = ready;
-            peer.PlayerToken = playerToken;
-            peer.PlayerName = playerName;
-            peer.Connected = true;
-            peer.DisconnectedAtUtc = DateTime.MinValue;
-            peers.Add(peer);
-            if (HostId == oldPeer.Id)
-            {
-                HostId = peer.Id;
-            }
-            LastActivityUtc = DateTime.UtcNow;
-            return true;
-        }
-    }
-
-    public void SetAi(string slot, bool enabled)
-    {
-        lock (gate)
-        {
-            if (!SlotOrder.Contains(slot) || peers.Any(peer => peer.Slot.Equals(slot, StringComparison.OrdinalIgnoreCase)))
-            {
-                return;
-            }
-
-            if (enabled)
-            {
-                aiSlots.Add(slot);
+                error = new ServerEnvelope("ERROR") { Message = "该位置已被占用。" };
             }
             else
             {
-                aiSlots.Remove(slot);
+                if (peer.Slot.HasValue)
+                {
+                    playerNames.Remove(peer.Slot.Value);
+                }
+
+                peer.Slot = slot;
+                playerNames[slot] = peer.Name;
+                notification = new ServerEnvelope("ROOM")
+                {
+                    RoomKey = Key,
+                    Slot = slot,
+                    IsHost = IsHostLocked(peer),
+                    Message = $"已切换到{BoardLayout.GetSlotLabel(slot)}位置。"
+                };
             }
-            LastActivityUtc = DateTime.UtcNow;
         }
+
+        if (error != null)
+        {
+            await SocketJson.SendAsync(peer.Socket, error, jsonOptions);
+            return;
+        }
+
+        await SocketJson.SendAsync(peer.Socket, notification!, jsonOptions);
+        await BroadcastLobbyAsync(jsonOptions);
     }
 
-    public void AddJoinRequest(ClientPeer peer)
+    public async Task<bool> AddPeerAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
     {
+        ServerEnvelope envelope;
         lock (gate)
         {
-            joinRequests[peer.Id] = peer;
-            LastActivityUtc = DateTime.UtcNow;
-        }
-    }
-
-    public ClientPeer? TakeJoinRequest(string clientId)
-    {
-        lock (gate)
-        {
-            if (!joinRequests.TryGetValue(clientId, out ClientPeer? peer))
+            if (session != null || peers.Count >= SlotOrder.Length)
             {
-                return null;
+                return false;
             }
 
-            joinRequests.Remove(clientId);
-            LastActivityUtc = DateTime.UtcNow;
-            return peer;
-        }
-    }
-
-    public void ClearJoinRequests()
-    {
-        lock (gate)
-        {
-            joinRequests.Clear();
-        }
-    }
-
-    public ClientPeer? HostPeer()
-    {
-        lock (gate)
-        {
-            return peers.FirstOrDefault(peer => peer.Id == HostId && peer.Connected);
-        }
-    }
-
-    public string[] AiSlotsSnapshot()
-    {
-        lock (gate)
-        {
-            return SlotOrder.Where(slot => aiSlots.Contains(slot)).ToArray();
-        }
-    }
-
-    public void EnsureHost()
-    {
-        lock (gate)
-        {
-            if (peers.All(value => value.Id != HostId || !value.Connected) && peers.Any(value => value.Connected))
+            SlotId slot = SlotOrder.First(slotValue => peers.All(value => value.Slot != slotValue));
+            peer.Room = this;
+            peer.Slot = slot;
+            peers.Add(peer);
+            if (string.IsNullOrEmpty(hostClientId))
             {
-                HostId = peers.First(value => value.Connected).Id;
+                hostClientId = peer.Id;
             }
-            LastActivityUtc = DateTime.UtcNow;
+            playerNames[slot] = peer.Name;
+            envelope = new ServerEnvelope("ROOM")
+            {
+                RoomKey = Key,
+                Slot = slot,
+                IsHost = IsHostLocked(peer),
+                Message = $"已加入房间 {Key}，你是{BoardLayout.GetSlotLabel(slot)}。"
+            };
+        }
+
+        await SocketJson.SendAsync(peer.Socket, envelope, jsonOptions);
+        return true;
+    }
+
+    public async Task RemovePeerAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
+    {
+        bool changed;
+        lock (gate)
+        {
+            changed = peers.Remove(peer);
+            if (peer.Slot.HasValue)
+            {
+                playerNames.Remove(peer.Slot.Value);
+            }
+            if (hostClientId == peer.Id)
+            {
+                hostClientId = peers.FirstOrDefault(value => value.Id != peer.Id)?.Id ?? string.Empty;
+            }
+
+            peer.Room = null;
+            peer.Slot = null;
+        }
+
+        if (changed)
+        {
+            await BroadcastLobbyAsync(jsonOptions);
+        }
+    }
+
+    public async Task UpdatePeerNameAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
+    {
+        lock (gate)
+        {
+            if (peer.Slot.HasValue && playerNames.ContainsKey(peer.Slot.Value))
+            {
+                playerNames[peer.Slot.Value] = peer.Name;
+            }
+        }
+
+        await BroadcastLobbyAsync(jsonOptions);
+        if (session != null)
+        {
+            await BroadcastStateAsync(jsonOptions);
+        }
+    }
+
+    public async Task StartAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
+    {
+        ServerEnvelope? error = null;
+        lock (gate)
+        {
+            if (!IsHostLocked(peer))
+            {
+                error = new ServerEnvelope("ERROR") { Message = "只有创建房间的人可以开始棋局。" };
+            }
+            else if (session != null)
+            {
+                error = new ServerEnvelope("ERROR") { Message = "房间已经开始。" };
+            }
+            else
+            {
+                RoomConfig config = BuildRoomConfig();
+                if (!BoardLayout.ValidateRoom(config, out string message))
+                {
+                    error = new ServerEnvelope("ERROR") { Message = message };
+                }
+                else
+                {
+                    session = new GameSession(config);
+                    RunAiTurnsLocked();
+                    version++;
+                }
+            }
+        }
+
+        if (error != null)
+        {
+            await BroadcastAsync(error, jsonOptions);
+            return;
+        }
+
+        await BroadcastStateAsync(jsonOptions);
+    }
+
+    public async Task SelectAsync(ClientPeer peer, int pieceId, JsonSerializerOptions jsonOptions)
+    {
+        ServerEnvelope? error = null;
+        lock (gate)
+        {
+            if (!CanActLocked(peer, out string message))
+            {
+                error = new ServerEnvelope("ERROR") { Message = message };
+            }
+            else if (!session!.TrySelectPiece(pieceId, out message))
+            {
+                error = new ServerEnvelope("ERROR") { Message = message };
+            }
+            else
+            {
+                version++;
+            }
+        }
+
+        if (error != null)
+        {
+            await SocketJson.SendAsync(peer.Socket, error, jsonOptions);
+            return;
+        }
+
+        await BroadcastStateAsync(jsonOptions);
+    }
+
+    public async Task MoveAsync(ClientPeer peer, int pieceId, HexCoord target, JsonSerializerOptions jsonOptions)
+    {
+        ServerEnvelope? error = null;
+        lock (gate)
+        {
+            if (!CanActLocked(peer, out string message))
+            {
+                error = new ServerEnvelope("ERROR") { Message = message };
+            }
+            else if (!session!.TryMovePieceById(pieceId, target, out message))
+            {
+                error = new ServerEnvelope("ERROR") { Message = message };
+            }
+            else
+            {
+                version++;
+            }
+        }
+
+        if (error != null)
+        {
+            await SocketJson.SendAsync(peer.Socket, error, jsonOptions);
+            return;
+        }
+
+        await BroadcastStateAsync(jsonOptions);
+    }
+
+    public async Task FinishAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
+    {
+        await ApplyTurnCommandAsync(peer, session => session.TryFinishTurn(out string message) ? null : message, jsonOptions);
+    }
+
+    public async Task PassAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
+    {
+        await ApplyTurnCommandAsync(peer, session => session.TryPassTurn(out string message) ? null : message, jsonOptions);
+    }
+
+    public async Task BroadcastLobbyAsync(JsonSerializerOptions jsonOptions)
+    {
+        await BroadcastAsync(new ServerEnvelope("LOBBY") { Room = ToSummary() }, jsonOptions);
+    }
+
+    public RoomSummary ToSummary()
+    {
+        lock (gate)
+        {
+            return new RoomSummary
+            {
+                RoomKey = Key,
+                Started = session != null,
+                RuleVariant = ruleVariant,
+                HostClientId = hostClientId,
+                Players = SlotOrder
+                    .Where(slot => playerNames.ContainsKey(slot))
+                    .Select(slot => new SeatSummary { Slot = slot, Name = playerNames[slot], Kind = PlayerKind.Human, IsHost = peers.Any(peer => peer.Id == hostClientId && peer.Slot == slot) })
+                    .ToList()
+            };
+        }
+    }
+
+    public bool IsHost(ClientPeer peer)
+    {
+        lock (gate)
+        {
+            return IsHostLocked(peer);
         }
     }
 
@@ -879,170 +830,225 @@ sealed class Room
         }
     }
 
-    public ClientPeer[] ConnectedPeersSnapshot()
+    private async Task ApplyTurnCommandAsync(ClientPeer peer, Func<GameSession, string?> command, JsonSerializerOptions jsonOptions)
     {
+        ServerEnvelope? error = null;
         lock (gate)
         {
-            return peers.Where(peer => peer.Connected).ToArray();
-        }
-    }
-
-    public async Task BroadcastReliableAsync(object message)
-    {
-        ReliableEnvelope envelope;
-        ClientPeer[] targets;
-        lock (gate)
-        {
-            targets = peers.Where(peer => peer.Connected).ToArray();
-            string messageId = $"{Key}-{nextBroadcastId++}";
-            object stamped = StampMessage(message, messageId);
-            envelope = new ReliableEnvelope
+            if (!CanActLocked(peer, out string message))
             {
-                MessageId = messageId,
-                Message = stamped,
-                PendingClientIds = targets.Select(peer => peer.Id).ToHashSet(StringComparer.OrdinalIgnoreCase),
-                LastSentAtUtc = DateTime.UtcNow,
-                Attempts = 1
-            };
-            pendingReliable[messageId] = envelope;
-            LastActivityUtc = DateTime.UtcNow;
-        }
-
-        foreach (ClientPeer peer in targets)
-        {
-            await peer.SendAsync(envelope.Message);
-        }
-    }
-
-    public async Task BroadcastActionReliableAsync(object message)
-    {
-        object stamped;
-        lock (gate)
-        {
-            int seq = nextActionSeq++;
-            stamped = StampMessage(message, string.Empty, seq);
-            actionLog.Add(new ActionLogEntry { Seq = seq, Message = stamped });
-            if (actionLog.Count > 200)
+                error = new ServerEnvelope("ERROR") { Message = message };
+            }
+            else
             {
-                actionLog.RemoveRange(0, actionLog.Count - 200);
+                string? result = command(session!);
+                if (result != null)
+                {
+                    error = new ServerEnvelope("ERROR") { Message = result };
+                }
+                else
+                {
+                    RunAiTurnsLocked();
+                    version++;
+                }
             }
         }
 
-        await BroadcastReliableAsync(stamped);
+        if (error != null)
+        {
+            await SocketJson.SendAsync(peer.Socket, error, jsonOptions);
+            return;
+        }
+
+        await BroadcastStateAsync(jsonOptions);
     }
 
-    public object[] ActionsAfter(int seq)
+    private RoomConfig BuildRoomConfig()
     {
-        lock (gate)
+        HashSet<SlotId> humanSlots = peers.Where(peer => peer.Slot.HasValue).Select(peer => peer.Slot!.Value).ToHashSet();
+        HashSet<SlotId> activeSlots = new(humanSlots);
+        foreach (SlotId slot in humanSlots.ToArray())
         {
-            return actionLog.Where(entry => entry.Seq > seq).Select(entry => entry.Message).ToArray();
+            activeSlots.Add(BoardLayout.GetOppositeSlot(slot));
+        }
+
+        return new RoomConfig
+        {
+            RoomId = Key,
+            RoomName = "网页房间 " + Key,
+            RuleVariant = ruleVariant,
+            Slots = SlotOrder
+                .Where(activeSlots.Contains)
+                .Select(slot => new SlotConfig
+                {
+                    SlotId = slot,
+                    PlayerKind = humanSlots.Contains(slot) ? PlayerKind.Human : PlayerKind.AiAdvanced
+                })
+                .ToList()
+        };
+    }
+
+    private bool CanActLocked(ClientPeer peer, out string message)
+    {
+        message = string.Empty;
+        if (session == null)
+        {
+            message = "房间还没有开始。";
+            return false;
+        }
+
+        if (peer.Slot != session.CurrentPlayerSlot)
+        {
+            message = "还没轮到你。";
+            return false;
+        }
+
+        return true;
+    }
+
+    private void RunAiTurnsLocked()
+    {
+        int guard = 0;
+        while (session != null && !session.IsGameOver && BoardLayout.IsAi(session.CurrentPlayerKind) && guard++ < 24)
+        {
+            session.ApplyAiMove(session.GetBestAiMove());
+            version++;
         }
     }
 
-    public void ClearActionLog()
+    private async Task BroadcastStateAsync(JsonSerializerOptions jsonOptions)
     {
+        GameSnapshot? snapshot;
+        List<SeatSummary> seats;
+        int stateVersion;
         lock (gate)
         {
-            actionLog.Clear();
-            nextActionSeq = 1;
+            snapshot = session?.ToSnapshot();
+            seats = SlotOrder
+                .Where(slot => playerNames.ContainsKey(slot))
+                .Select(slot => new SeatSummary { Slot = slot, Name = playerNames[slot], Kind = PlayerKind.Human, IsHost = peers.Any(peer => peer.Id == hostClientId && peer.Slot == slot) })
+                .ToList();
+            stateVersion = version;
+        }
+
+        await BroadcastAsync(new ServerEnvelope("STATE") { RoomKey = Key, Snapshot = snapshot, Seats = seats, Version = stateVersion }, jsonOptions);
+    }
+
+    private async Task BroadcastAsync(ServerEnvelope envelope, JsonSerializerOptions jsonOptions)
+    {
+        ClientPeer[] targets = PeersSnapshot();
+        foreach (ClientPeer peer in targets)
+        {
+            envelope.IsHost = IsHost(peer);
+            await SocketJson.SendAsync(peer.Socket, envelope, jsonOptions);
         }
     }
 
-    public void Acknowledge(string clientId, string messageId)
+    private bool IsHostLocked(ClientPeer peer)
     {
-        if (string.IsNullOrEmpty(messageId))
+        return !string.IsNullOrEmpty(hostClientId) && peer.Id == hostClientId;
+    }
+}
+
+sealed class ClientCommand
+{
+    public string Type { get; set; } = string.Empty;
+    public string Account { get; set; } = string.Empty;
+    public string Password { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string RoomKey { get; set; } = string.Empty;
+    public string RuleVariant { get; set; } = string.Empty;
+    public string Slot { get; set; } = string.Empty;
+    public int PieceId { get; set; }
+    public int Q { get; set; }
+    public int R { get; set; }
+}
+
+sealed class ServerEnvelope
+{
+    public ServerEnvelope(string type)
+    {
+        Type = type;
+    }
+
+    public string Type { get; set; }
+    public string ClientId { get; set; } = string.Empty;
+    public string Account { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string RoomKey { get; set; } = string.Empty;
+    public SlotId? Slot { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public int Version { get; set; }
+    public GameSnapshot? Snapshot { get; set; }
+    public RoomSummary? Room { get; set; }
+    public List<RoomSummary> Rooms { get; set; } = new();
+    public List<SeatSummary> Seats { get; set; } = new();
+    public List<MemberSummary> Members { get; set; } = new();
+    public List<AccountSummary> Accounts { get; set; } = new();
+    public bool IsHost { get; set; }
+}
+
+sealed class PlayerAccount
+{
+    public PlayerAccount(string account, string password, string displayName)
+    {
+        Account = account;
+        Password = password;
+        DisplayName = displayName;
+    }
+
+    public string Account { get; }
+    public string Password { get; set; }
+    public string DisplayName { get; set; }
+    public bool Disabled { get; set; }
+}
+
+sealed class RoomSummary
+{
+    public string RoomKey { get; set; } = string.Empty;
+    public bool Started { get; set; }
+    public RuleVariant RuleVariant { get; set; }
+    public string HostClientId { get; set; } = string.Empty;
+    public List<SeatSummary> Players { get; set; } = new();
+}
+
+sealed class SeatSummary
+{
+    public SlotId Slot { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public PlayerKind Kind { get; set; }
+    public bool IsHost { get; set; }
+}
+
+sealed class MemberSummary
+{
+    public string ClientId { get; set; } = string.Empty;
+    public string Account { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string RoomKey { get; set; } = string.Empty;
+    public SlotId? Slot { get; set; }
+    public bool IsAdmin { get; set; }
+    public bool IsHost { get; set; }
+}
+
+sealed class AccountSummary
+{
+    public string Account { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public bool Online { get; set; }
+    public bool Disabled { get; set; }
+}
+
+static class SocketJson
+{
+    public static async Task SendAsync(WebSocket socket, object value, JsonSerializerOptions jsonOptions)
+    {
+        if (socket.State != WebSocketState.Open)
         {
             return;
         }
 
-        lock (gate)
-        {
-            if (!pendingReliable.TryGetValue(messageId, out ReliableEnvelope? envelope))
-            {
-                return;
-            }
-
-            envelope.PendingClientIds.Remove(clientId);
-            if (envelope.PendingClientIds.Count == 0)
-            {
-                pendingReliable.Remove(messageId);
-            }
-        }
-    }
-
-    public async Task RetryPendingAsync()
-    {
-        List<(ClientPeer Peer, object Message)> sends = new List<(ClientPeer, object)>();
-        lock (gate)
-        {
-            DateTime now = DateTime.UtcNow;
-            foreach (ReliableEnvelope envelope in pendingReliable.Values.ToArray())
-            {
-                if ((now - envelope.LastSentAtUtc).TotalMilliseconds < 750)
-                {
-                    continue;
-                }
-
-                if (envelope.Attempts >= 20)
-                {
-                    pendingReliable.Remove(envelope.MessageId);
-                    continue;
-                }
-
-                envelope.Attempts++;
-                envelope.LastSentAtUtc = now;
-                foreach (ClientPeer peer in peers.Where(peer => peer.Connected))
-                {
-                    if (envelope.PendingClientIds.Contains(peer.Id))
-                    {
-                        sends.Add((peer, envelope.Message));
-                    }
-                }
-            }
-        }
-
-        foreach ((ClientPeer peer, object message) in sends)
-        {
-            await peer.SendAsync(message);
-        }
-    }
-
-    public string Summary()
-    {
-        lock (gate)
-        {
-            IEnumerable<string> humanLines = peers.Select(peer => $"{peer.Slot}: {DisplayName(peer)} {(peer.Connected ? (peer.Ready ? "已准备" : "未准备") : "离线")}{(peer.Id == HostId ? " 房主" : string.Empty)}");
-            IEnumerable<string> aiLines = SlotOrder.Where(slot => aiSlots.Contains(slot)).Select(slot => $"{slot}: 高级人机");
-            IEnumerable<string> emptyLines = SlotOrder
-                .Where(slot => peers.All(peer => peer.Slot != slot) && !aiSlots.Contains(slot))
-                .Select(slot => $"{slot}: 空位");
-            return string.Join("\n", humanLines.Concat(aiLines).Concat(emptyLines));
-        }
-    }
-
-    private static bool IsSeatExpired(ClientPeer peer)
-    {
-        return peer.DisconnectedAtUtc != DateTime.MinValue && DateTime.UtcNow - peer.DisconnectedAtUtc > TimeSpan.FromMinutes(3);
-    }
-
-    private static string DisplayName(ClientPeer peer)
-    {
-        return string.IsNullOrWhiteSpace(peer.PlayerName) ? peer.Id : peer.PlayerName;
-    }
-
-    private static object StampMessage(object source, string messageId, int actionSeq = 0)
-    {
-        string json = JsonSerializer.Serialize(source);
-        Dictionary<string, object?>? values = JsonSerializer.Deserialize<Dictionary<string, object?>>(json);
-        values ??= new Dictionary<string, object?>();
-        if (!string.IsNullOrEmpty(messageId))
-        {
-            values["messageId"] = messageId;
-        }
-        if (actionSeq > 0)
-        {
-            values["actionSeq"] = actionSeq;
-        }
-        return values;
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(value, jsonOptions);
+        await socket.SendAsync(payload, WebSocketMessageType.Text, true, CancellationToken.None);
     }
 }

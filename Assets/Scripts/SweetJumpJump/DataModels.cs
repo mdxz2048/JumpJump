@@ -140,7 +140,75 @@ namespace SweetJumpJump
         public string CustomMusicPath = string.Empty;
         public string OnlinePlayerToken = string.Empty;
         public string OnlinePlayerName = string.Empty;
+        public string OnlinePlayerAccount = string.Empty;
+        public string OnlinePlayerPassword = string.Empty;
     }
+
+    // ---- Online protocol data models (WebSocket / new server) ----
+
+    [Serializable]
+    public sealed class OnlineHexCoord
+    {
+        public int q;
+        public int r;
+    }
+
+    [Serializable]
+    public sealed class OnlinePieceState
+    {
+        public int pieceId;
+        public string owner;
+        public OnlineHexCoord position;
+    }
+
+    [Serializable]
+    public sealed class OnlinePlayerEntry
+    {
+        public string slotId;
+        public string playerKind;
+    }
+
+    [Serializable]
+    public sealed class OnlineGameSnapshot
+    {
+        public string currentPlayerSlot;
+        public string currentPlayerKind;
+        public int selectedPieceId;
+        public bool hasMovedThisTurn;
+        public bool isGameOver;
+        public string statusMessage;
+        public string winnerLabel;
+        public OnlinePieceState[] pieces;
+        public OnlineHexCoord[] legalTargets;
+        public OnlinePlayerEntry[] players;
+    }
+
+    [Serializable]
+    public sealed class OnlineSeatSummary
+    {
+        public string slot;
+        public string name;
+        public string kind;
+        public bool isHost;
+    }
+
+    [Serializable]
+    public sealed class OnlineRoomSummary
+    {
+        public string roomKey;
+        public bool started;
+        public string ruleVariant;
+        public string hostClientId;
+        public OnlineSeatSummary[] players;
+    }
+
+    // Wrapper types for JsonUtility array deserialization
+    [Serializable]
+    public sealed class OnlineSeatList { public OnlineSeatSummary[] seats; }
+    [Serializable]
+    public sealed class OnlineRoomList { public OnlineRoomSummary[] rooms; }
+    [Serializable]
+    public sealed class OnlineRoomSummaryWrapper { public OnlineRoomSummary room; }
 
     [Serializable]
     public sealed class AppSaveData

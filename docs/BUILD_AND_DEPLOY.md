@@ -1,31 +1,36 @@
 # 构建与部署
 
-## 环境
+## 环境要求
 
-- macOS
-- Unity `2022.3.62f3`
-- Xcode
-- iPad 真机
-- Apple Development 证书和可用的自动签名 Team
+| 工具 | 版本 / 说明 |
+|------|------------|
+| macOS | 开发机 |
+| Unity | `2022.3.62f3` |
+| Xcode | 与 iOS 目标匹配的版本 |
+| .NET SDK | 7+ （用于编译服务端） |
+| iPad | 真机（已验证 iPad Air 11-inch） |
+| Apple 证书 | Apple Development 证书 + 可用 Team（自动签名） |
 
-当前项目设置：
+**Unity 工程设置**（由 `StageThreeBuildTools.ConfigureIPadBuild()` 自动写入）：
 
 - Product Name：`甜姐的跳跳棋`
 - Bundle ID：`com.lvzhipeng.sweetjumpjump`
 - iOS Team ID：`J3M89K2N56`
-- iOS Target：iPad only
+- iOS Target：`iPhoneAndiPad`，Target OS ≥ 13.0
 - Orientation：Portrait
 - Scripting Backend：IL2CPP
 
-## Unity 内验证
+---
 
-Unity 菜单：
+## 一、Unity 内验证
+
+在 Unity 编辑器菜单执行：
 
 - `Tools/SweetJumpJump/Verify Stage One`
 - `Tools/SweetJumpJump/Verify Stage Two`
 - `Tools/SweetJumpJump/Verify Stage Three`
 
-命令行：
+命令行批处理：
 
 ```bash
 '/Applications/Unity/Hub/Editor/2022.3.62f3/Unity.app/Contents/MacOS/Unity' \
@@ -40,14 +45,14 @@ Unity 菜单：
 ```text
 StageOneVerifier passed
 StageTwoVerifier passed
-StageThreeVerifier passed
+StageThreeVerifier passed: stage one/two regressions, portrait iPad settings, and iOS export readiness.
 ```
 
-## 导出 Xcode 工程
+---
 
-Unity 菜单：
+## 二、导出 Xcode 工程
 
-- `Tools/SweetJumpJump/Export Xcode Project`
+Unity 菜单：`Tools/SweetJumpJump/Export Xcode Project`
 
 命令行：
 
@@ -59,17 +64,11 @@ Unity 菜单：
   -logFile /tmp/sweetjumpjump_export.log
 ```
 
-导出目录：
+导出目录：`Builds/iOS/`（不提交到 Git，其他机器需重新导出）。
 
-```text
-Builds/iOS/
-```
+---
 
-注意：`Builds/` 是构建产物，默认不提交到 GitHub。其他机器需要重新导出。
-
-## Xcode 真机构建
-
-示例命令：
+## 三、Xcode 真机构建
 
 ```bash
 '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild' \
@@ -82,21 +81,15 @@ Builds/iOS/
   build
 ```
 
-成功日志应包含：
+成功日志应包含：`** BUILD SUCCEEDED **`
 
-```text
-** BUILD SUCCEEDED **
-```
+常见非阻塞警告：`A 1024x1024 app store icon is required for iOS apps`（不影响真机安装，上架前补齐）。
 
-常见非阻塞警告：
+---
 
-- `A 1024x1024 app store icon is required for iOS apps`
+## 四、安装到 iPad
 
-这不会阻止真机安装，但正式上架前需要补齐 App Store 图标。
-
-## 安装到 iPad
-
-先查设备：
+查设备 ID：
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
@@ -109,7 +102,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 /usr/bin/xcrun devicectl device install app \
   --device <IPAD_DEVICE_ID> \
-  /tmp/sweetjumpjump-ios-dd/Build/Products/Debug-iphoneos/ProductName.app
+  /tmp/sweetjumpjump-ios-dd/Build/Products/Debug-iphoneos/甜姐的跳跳棋.app
 ```
 
 启动：
@@ -128,28 +121,48 @@ App installed
 Launched application with com.lvzhipeng.sweetjumpjump bundle identifier.
 ```
 
+---
+
+## 五、服务端部署
+
+### 本地开发
+
+```bash
+dotnet run --project Server/SweetJumpJump.Server.csproj -- 53333
+```
+
+访问 `http://127.0.0.1:53333/` 进入网页端。
+
+### 生产部署（Linux 示例）
+
+```bash
+dotnet publish Server/SweetJumpJump.Server.csproj -c Release -o /opt/sweetjumpjump
+# 确保 Web/ 目录在 /opt/sweetjumpjump/ 同级或通过环境变量指定路径
+/opt/sweetjumpjump/SweetJumpJump.Server 53333
+```
+
+服务端在启动时自动查找 `Web/` 目录（当前目录或父目录），提供静态文件服务。
+
+### 服务端默认账号
+
+| 账号 | 密码 |
+|------|------|
+| `tian` | `tian` |
+| `mdxz` | `mdxz` |
+
+账号数据保存在内存，服务重启后恢复默认。
+
+管理员密钥：`xiaozhi2048-admin`（首页连续点圆形标记 7 次进入管理入口）。
+
+---
+
 ## 签名排查
 
-如果遇到：
+遇到 `No Account for Team` 或 `No profiles for com.lvzhipeng.sweetjumpjump`：
 
-```text
-No Account for Team
-No profiles for com.lvzhipeng.sweetjumpjump were found
-```
+1. 打开 Xcode，打开 `Builds/iOS/Unity-iPhone.xcodeproj`。
+2. 选 `Unity-iPhone` target → `Signing & Capabilities`。
+3. 登录 Apple ID，勾选 `Automatically manage signing`，选择可用 Team。
+4. 确认 Bundle ID 为 `com.lvzhipeng.sweetjumpjump`。
 
-处理方式：
-
-- 打开 Xcode。
-- 打开 `Builds/iOS/Unity-iPhone.xcodeproj`。
-- 选择 `Unity-iPhone` target。
-- 进入 `Signing & Capabilities`。
-- 登录 Apple ID。
-- 勾选 `Automatically manage signing`。
-- Team 选择可用团队。
-- 确认 Bundle Identifier 是 `com.lvzhipeng.sweetjumpjump`。
-
-如果 Team ID 变化，同步更新：
-
-```text
-Assets/Scripts/Editor/StageThreeBuildTools.cs
-```
+如果 Team ID 变化，同步更新 `Assets/Scripts/Editor/StageThreeBuildTools.cs` 中的 `appleDeveloperTeamID`。

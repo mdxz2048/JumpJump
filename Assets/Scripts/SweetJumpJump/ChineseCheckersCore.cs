@@ -880,6 +880,123 @@ namespace SweetJumpJump
             return piece.Position;
         }
 
+        // Apply a server-authoritative STATE snapshot to this session.
+        // Used in online mode where the server is the rules authority.
+        public void ApplySnapshot(OnlineGameSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                return;
+            }
+
+            // Rebuild piece maps
+            piecesById.Clear();
+            piecesByCoord.Clear();
+            if (snapshot.pieces != null)
+            {
+                for (int i = 0; i < snapshot.pieces.Length; i++)
+                {
+                    OnlinePieceState ps = snapshot.pieces[i];
+                    SlotId owner;
+                    if (!Enum.TryParse(ps.owner, true, out owner))
+                    {
+                        continue;
+                    }
+
+                    HexCoord pos = ps.position != null ? new HexCoord(ps.position.q, ps.position.r) : default;
+                    PieceState piece = new PieceState
+                    {
+                        PieceId = ps.pieceId,
+                        Owner = owner,
+                        Position = pos
+                    };
+                    piecesById[piece.PieceId] = piece;
+                    piecesByCoord[piece.Position] = piece;
+                }
+            }
+
+            // Rebuild player list from snapshot.players (preserves turn order)
+            players.Clear();
+            if (snapshot.players != null)
+            {
+                foreach (SlotId preferred in PreferredTurnOrder)
+                {
+                    for (int i = 0; i < snapshot.players.Length; i++)
+                    {
+                        OnlinePlayerEntry entry = snapshot.players[i];
+                        SlotId entrySlot;
+                        if (!Enum.TryParse(entry.slotId, true, out entrySlot))
+                        {
+                            continue;
+                        }
+
+                        if (entrySlot == preferred)
+                        {
+                            PlayerKind kind;
+                            if (!Enum.TryParse(entry.playerKind, true, out kind))
+                            {
+                                kind = PlayerKind.Human;
+                            }
+
+                            players.Add(new PlayerState { SlotId = entrySlot, PlayerKind = kind });
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Set current player index
+            SlotId currentSlot;
+            if (!string.IsNullOrEmpty(snapshot.currentPlayerSlot) && Enum.TryParse(snapshot.currentPlayerSlot, true, out currentSlot))
+            {
+                currentPlayerIndex = 0;
+                for (int i = 0; i < players.Count; i++)
+                {
+                    if (players[i].SlotId == currentSlot)
+                    {
+                        currentPlayerIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            // Legal targets
+            legalTargets.Clear();
+            if (snapshot.legalTargets != null)
+            {
+                for (int i = 0; i < snapshot.legalTargets.Length; i++)
+                {
+                    OnlineHexCoord c = snapshot.legalTargets[i];
+                    legalTargets.Add(new HexCoord(c.q, c.r));
+                }
+            }
+
+            selectedPieceId = snapshot.selectedPieceId > 0 ? snapshot.selectedPieceId : -1;
+            HasMovedThisTurn = snapshot.hasMovedThisTurn;
+            IsGameOver = snapshot.isGameOver;
+            StatusMessage = snapshot.statusMessage ?? string.Empty;
+            WinnerLabel = snapshot.winnerLabel ?? string.Empty;
+
+            // Infer move mode
+            moveMode = selectedPieceId >= 0
+                ? (HasMovedThisTurn ? MoveMode.JumpChain : MoveMode.None)
+                : MoveMode.None;
+
+            // Keep completedSlots in sync
+            completedSlots.Clear();
+            foreach (PlayerState player in players)
+            {
+                if (HasPlayerWon(player.SlotId))
+                {
+                    completedSlots.Add(player.SlotId);
+                }
+            }
+
+            // Clear transient state
+            visitedJumpCells.Clear();
+            currentTurnSteps.Clear();
+        }
+
         private void BuildPlayers(RoomConfig roomConfig)
         {
             Dictionary<SlotId, PlayerKind> configuredKinds = new Dictionary<SlotId, PlayerKind>();

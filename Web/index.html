@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sweet Jump Jump</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main id="loginView" class="login-view">
+      <section class="login-card">
+        <div class="brand-mark"></div>
+        <h1>棋手进入</h1>
+        <label>
+          账号
+          <input id="accountInput" maxlength="24" value="tian">
+        </label>
+        <label>
+          密码
+          <input id="passwordInput" type="password" value="tian">
+        </label>
+        <button id="loginButton">进入</button>
+        <div id="adminPanel" class="admin-login hidden">
+          <label>
+            管理员密钥
+            <input id="adminPasswordInput" type="password" placeholder="管理员密钥">
+          </label>
+          <button id="adminLoginButton">进入成员管理</button>
+        </div>
+        <div id="loginStatusText" class="login-status">正在连接服务器...</div>
+      </section>
+    </main>
+
+    <main id="adminView" class="lobby-view hidden">
+      <section class="lobby-shell">
+        <h1>成员管理</h1>
+        <div class="admin-actions">
+          <button id="adminRefreshButton">刷新</button>
+          <button id="adminBackButton">返回首页</button>
+        </div>
+        <div class="lobby-grid admin-grid">
+          <section class="panel">
+            <div class="panel-title">新增棋手</div>
+            <label>
+              账号
+              <input id="newAccountInput" maxlength="24" placeholder="账号">
+            </label>
+            <label>
+              密码
+              <input id="newPasswordInput" maxlength="32" placeholder="密码">
+            </label>
+            <label>
+              默认昵称
+              <input id="newNameInput" maxlength="14" placeholder="默认昵称">
+            </label>
+            <button id="addPlayerButton">新增棋手</button>
+          </section>
+          <section class="panel">
+            <div class="panel-title">棋手账号</div>
+            <div id="adminAccounts" class="room-list"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-title">在线成员</div>
+            <div id="adminMembers" class="room-list"></div>
+          </section>
+          <section class="panel discover-panel">
+            <div class="panel-title">房间状态</div>
+            <div id="adminRooms" class="room-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <main id="lobbyView" class="lobby-view hidden">
+      <section class="lobby-shell">
+        <h1>在线大厅</h1>
+        <div class="lobby-grid">
+          <section class="panel">
+            <div class="panel-title">创建 / 加入</div>
+            <label>
+              我的昵称
+              <input id="nicknameInput" maxlength="14" placeholder="昵称">
+            </label>
+            <button id="saveNicknameButton">保存昵称</button>
+            <div class="row">
+              <select id="ruleSelect">
+                <option value="OnePieceJump">一子跳</option>
+                <option value="SpaceJump">空跳</option>
+              </select>
+              <button id="createButton">建房</button>
+            </div>
+            <div class="row">
+              <input id="roomKeyInput" placeholder="房间号">
+              <button id="joinButton">加入</button>
+            </div>
+            <button id="refreshButton">刷新房间</button>
+            <div id="statusText" class="status">等待连接。</div>
+          </section>
+
+          <section id="roomPanel" class="panel hidden">
+            <div class="panel-title">当前房间</div>
+            <div class="room-line">房间：<strong id="roomKeyText">----</strong></div>
+            <div class="room-line">我的位置：<strong id="slotText">-</strong></div>
+            <div id="seatList" class="seat-list"></div>
+            <button id="startButton" disabled>开始本局</button>
+          </section>
+
+          <section class="panel discover-panel">
+            <div class="panel-title">发现房间</div>
+            <div id="roomList" class="room-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <main id="gameView" class="game-view hidden">
+      <div class="game-title" id="gameTitle">在线跳跳棋</div>
+      <canvas id="boardCanvas" width="980" height="980"></canvas>
+      <section class="game-chrome">
+        <div class="turn-display">
+          <div id="currentTurnPiece" class="turn-piece"></div>
+          <div>
+            <div id="currentTurnText" class="turn-text">等待开局</div>
+            <div id="mobileStatusText" class="mobile-status">请选择一个房间开始。</div>
+          </div>
+        </div>
+        <div class="game-actions">
+          <button id="finishButton" disabled>完成移动</button>
+          <button id="passButton" disabled>放弃移动</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

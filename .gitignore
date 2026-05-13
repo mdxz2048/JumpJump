@@ -12,6 +12,7 @@
 # Unity generated files
 *.csproj
 !/Server/*.csproj
+!/Shared/**/*.csproj
 *.sln
 *.suo
 *.tmp
@@ -52,3 +53,5 @@ DerivedData/
 # Local server build output
 /Server/bin/
 /Server/obj/
+/Shared/**/bin/
+/Shared/**/obj/
