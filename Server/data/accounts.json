@@ -1,0 +1,21 @@
+[
+  {
+    "Account": "tian",
+    "Password": "tian",
+    "DisplayName": "tian",
+    "Disabled": false,
+    "PreferDualDevice": false,
+    "PreferredSlots": [
+      "Bottom",
+      "Top"
+    ]
+  },
+  {
+    "Account": "mdxz",
+    "Password": "mdxz",
+    "DisplayName": "mdxz",
+    "Disabled": false,
+    "PreferDualDevice": false,
+    "PreferredSlots": []
+  }
+]

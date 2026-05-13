@@ -19,9 +19,15 @@ namespace SweetJumpJump
         public string message;
         public string roomKey;
         public string slot;
+        public string slot2;
         public string ruleVariant;
         public bool isHost;
         public int version;
+        public bool dualDevice;
+        public string targetClientId;
+        public string[] slots;
+        public string[] preferredSlots;
+        public string[] controlledSlots;
 
         // Game action fields
         public int pieceId;
@@ -46,12 +52,15 @@ namespace SweetJumpJump
         public string message;
         public string roomKey;
         public string slot;
+        public string slot2;
         public string ruleVariant;
         public bool isHost;
         public int version;
         public int pieceId;
         public int q;
         public int r;
+        public bool dualDevice;
+        public string targetClientId;
     }
 
     public sealed class OnlineClient : IDisposable
@@ -245,8 +254,16 @@ namespace SweetJumpJump
                     version = raw.version,
                     pieceId = raw.pieceId,
                     q = raw.q,
-                    r = raw.r
+                    r = raw.r,
+                    slot2 = raw.slot2,
+                    dualDevice = raw.dualDevice,
+                    targetClientId = raw.targetClientId
                 };
+
+                // Parse string arrays for new protocol
+                msg.controlledSlots = ParseNestedStringArray(json, "\"controlledSlots\"");
+                msg.preferredSlots = ParseNestedStringArray(json, "\"preferredSlots\"");
+                msg.slots = ParseNestedStringArray(json, "\"slots\"");
 
                 if (raw.type == "STATE")
                 {
@@ -333,6 +350,17 @@ namespace SweetJumpJump
             AppendStr(sb, "name", msg.name);
             AppendStr(sb, "roomKey", msg.roomKey);
             AppendStr(sb, "ruleVariant", msg.ruleVariant);
+            AppendStr(sb, "slot", msg.slot);
+            AppendStr(sb, "targetClientId", msg.targetClientId);
+            if (msg.dualDevice)
+                sb.Append("\"dualDevice\":true,");
+            if (msg.slots != null && msg.slots.Length > 0)
+            {
+                sb.Append("\"slots\":[");
+                foreach (var s in msg.slots) { sb.Append("\"").Append(s).Append("\","); }
+                if (sb[sb.Length - 1] == ',') sb.Remove(sb.Length - 1, 1);
+                sb.Append("],");
+            }
             if (msg.pieceId != 0)
                 sb.Append("\"pieceId\":").Append(msg.pieceId).Append(",");
             if (msg.q != 0 || msg.r != 0)
@@ -341,6 +369,30 @@ namespace SweetJumpJump
                 sb.Remove(sb.Length - 1, 1);
             sb.Append("}");
             return sb.ToString();
+        }
+
+        private static string[] ParseNestedStringArray(string json, string key)
+        {
+            int keyIdx = json.IndexOf(key, StringComparison.Ordinal);
+            if (keyIdx < 0) return null;
+            int colonIdx = json.IndexOf(':', keyIdx + key.Length);
+            if (colonIdx < 0) return null;
+            int start = json.IndexOf('[', colonIdx);
+            if (start < 0) return null;
+            int depth = 0, end = -1;
+            for (int i = start; i < json.Length; i++)
+            {
+                if (json[i] == '[') depth++;
+                else if (json[i] == ']') { depth--; if (depth == 0) { end = i; break; } }
+            }
+            if (end < 0) return null;
+            string inner = json.Substring(start + 1, end - start - 1).Trim();
+            if (string.IsNullOrEmpty(inner)) return new string[0];
+            var parts = inner.Split(',');
+            var result = new string[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+                result[i] = parts[i].Trim().Trim('"');
+            return result;
         }
 
         private static void AppendStr(StringBuilder sb, string key, string value)

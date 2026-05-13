@@ -16,6 +16,18 @@ const pieceColors = {
   TopLeft: "rgb(171, 201, 191)"
 };
 
+// ── Hex-diagram slot positions (unit circle, 0° = top) ───────────────────────
+// Slots arranged at 60° increments: Top=0°, TopRight=60°, BottomRight=120°,
+// Bottom=180°, BottomLeft=240°, TopLeft=300°
+const slotAngles = {
+  Top: -90,
+  TopRight: -30,
+  BottomRight: 30,
+  Bottom: 90,
+  BottomLeft: 150,
+  TopLeft: 210
+};
+
 const unityColors = {
   boardCell: "rgba(219, 237, 250, .86)",
   boardTarget: "rgba(247, 255, 255, .98)",
@@ -45,6 +57,17 @@ const slotCampAnchors = {
   TopLeft: { q: -4, r: -4 }
 };
 
+// ── Persistence helpers ───────────────────────────────────────────────────────
+const LS_KEY = "sweetJumpJump";
+function loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || "{}"); } catch { return {}; }
+}
+function savePrefs(patch) {
+  const prefs = { ...loadPrefs(), ...patch };
+  localStorage.setItem(LS_KEY, JSON.stringify(prefs));
+}
+
+// ── Application state ─────────────────────────────────────────────────────────
 const state = {
   ws: null,
   authed: false,
@@ -54,6 +77,9 @@ const state = {
   displayName: "",
   roomKey: "",
   mySlot: "",
+  mySlot2: "",
+  mySlots: [],          // all controlled slots (1 or 2)
+  isDualDevice: false,
   isHost: false,
   snapshot: null,
   seats: [],
@@ -74,6 +100,7 @@ const els = {
   roomPanel: document.getElementById("roomPanel"),
   accountInput: document.getElementById("accountInput"),
   passwordInput: document.getElementById("passwordInput"),
+  dualDeviceInput: document.getElementById("dualDeviceInput"),
   adminPanel: document.getElementById("adminPanel"),
   adminPasswordInput: document.getElementById("adminPasswordInput"),
   loginButton: document.getElementById("loginButton"),
@@ -91,8 +118,14 @@ const els = {
   joinButton: document.getElementById("joinButton"),
   refreshButton: document.getElementById("refreshButton"),
   startButton: document.getElementById("startButton"),
+  leaveRoomButton: document.getElementById("leaveRoomButton"),
   finishButton: document.getElementById("finishButton"),
   passButton: document.getElementById("passButton"),
+  hostSettingsButton: document.getElementById("hostSettingsButton"),
+  hostSettingsModal: document.getElementById("hostSettingsModal"),
+  restartGameButton: document.getElementById("restartGameButton"),
+  disbandRoomButton: document.getElementById("disbandRoomButton"),
+  closeHostSettingsButton: document.getElementById("closeHostSettingsButton"),
   roomKeyInput: document.getElementById("roomKeyInput"),
   ruleSelect: document.getElementById("ruleSelect"),
   roomList: document.getElementById("roomList"),
@@ -100,14 +133,17 @@ const els = {
   adminRooms: document.getElementById("adminRooms"),
   roomKeyText: document.getElementById("roomKeyText"),
   slotText: document.getElementById("slotText"),
-  seatList: document.getElementById("seatList"),
+  dualDeviceBadge: document.getElementById("dualDeviceBadge"),
+  hostControls: document.getElementById("hostControls"),
+  slotCanvas: document.getElementById("slotCanvas"),
   statusText: document.getElementById("statusText"),
   loginStatusText: document.getElementById("loginStatusText"),
   mobileStatusText: document.getElementById("mobileStatusText"),
   currentTurnPiece: document.getElementById("currentTurnPiece"),
   currentTurnText: document.getElementById("currentTurnText"),
   gameTitle: document.getElementById("gameTitle"),
-  canvas: document.getElementById("boardCanvas")
+  canvas: document.getElementById("boardCanvas"),
+  gameChrome: document.querySelector(".game-chrome")
 };
 
 const ctx = els.canvas.getContext("2d");
@@ -144,8 +180,18 @@ function handleMessage(message) {
       state.authed = true;
       state.account = message.account || els.accountInput.value.trim();
       state.displayName = message.name || state.account;
+      state.isDualDevice = !!message.dualDevice;
       els.nicknameInput.value = state.displayName;
-      localStorage.setItem("sweetJumpJumpAccount", state.account);
+      savePrefs({
+        account: els.accountInput.value.trim(),
+        password: els.passwordInput.value,
+        nickname: state.displayName,
+        dualDevice: state.isDualDevice
+      });
+      // Apply preferred slots if returned
+      if (message.preferredSlots && message.preferredSlots.length > 0) {
+        state.preferredSlots = message.preferredSlots;
+      }
       setStatus(message.message || "进入成功。");
       refreshPanels();
       break;
@@ -175,19 +221,71 @@ function handleMessage(message) {
     case "ROOM":
       state.roomKey = message.roomKey;
       state.mySlot = message.slot;
+      state.mySlot2 = message.slot2 || "";
+      state.mySlots = message.controlledSlots || (state.mySlot ? [state.mySlot] : []);
+      state.isDualDevice = !!message.dualDevice;
       state.isHost = !!message.isHost;
       state.snapshot = null;
       state.seats = [];
       setStatus(message.message);
       refreshPanels();
       renderRoomShell();
+      drawSlotDiagram();
       break;
     case "LOBBY":
       if (message.room) {
         state.seats = message.room.players || [];
+        if (message.controlledSlots) {
+          state.mySlots = message.controlledSlots;
+          state.mySlot = state.mySlots[0] || state.mySlot;
+          state.mySlot2 = state.mySlots[1] || "";
+        }
+        state.isDualDevice = !!message.dualDevice;
+        state.isHost = !!message.isHost;
         updateHostFlagFromSeats();
-        renderSeats();
+        renderRoomShell();
+        drawSlotDiagram();
       }
+      break;
+    case "LOBBY_RETURN":
+      // Returned to lobby after explicit leave
+      state.roomKey = "";
+      state.mySlot = "";
+      state.mySlot2 = "";
+      state.mySlots = [];
+      state.seats = [];
+      state.snapshot = null;
+      state.isHost = false;
+      setStatus(message.message || "已退出房间。");
+      refreshPanels();
+      drawSlotDiagram();
+      break;
+    case "KICKED":
+      state.roomKey = "";
+      state.mySlot = "";
+      state.mySlot2 = "";
+      state.mySlots = [];
+      state.seats = [];
+      state.snapshot = null;
+      state.isHost = false;
+      setStatus(message.message || "你已被房主移出房间。");
+      refreshPanels();
+      drawSlotDiagram();
+      break;
+    case "ROOM_DISBANDED":
+      state.roomKey = "";
+      state.mySlot = "";
+      state.mySlot2 = "";
+      state.mySlots = [];
+      state.seats = [];
+      state.snapshot = null;
+      state.selectedPieceId = -1;
+      state.isHost = false;
+      hideHostSettings();
+      setStatus(message.message || "房间已被房主解散。");
+      refreshPanels();
+      drawSlotDiagram();
+      drawBoard();
       break;
     case "STATE": {
       const prevPieces = state.snapshot ? (state.snapshot.pieces || []) : [];
@@ -195,6 +293,12 @@ function handleMessage(message) {
       state.snapshot = message.snapshot;
       state.seats = message.seats || state.seats;
       state.isHost = !!message.isHost;
+      if (message.controlledSlots) {
+        state.mySlots = message.controlledSlots;
+        state.mySlot = state.mySlots[0] || state.mySlot;
+        state.mySlot2 = state.mySlots[1] || "";
+      }
+      state.isDualDevice = !!message.dualDevice;
       state.selectedPieceId = state.snapshot ? state.snapshot.selectedPieceId : -1;
       // Detect piece movements and trigger arrival-flash animations
       if (state.snapshot) {
@@ -207,7 +311,7 @@ function handleMessage(message) {
       }
       setStatus(state.snapshot ? state.snapshot.statusMessage : "");
       renderRoomShell();
-      renderSeats();
+      drawSlotDiagram();
       renderCurrentTurn();
       drawBoard();
       refreshActions();
@@ -224,6 +328,8 @@ function refreshPanels() {
   els.gameView.classList.toggle("hidden", !state.authed || !state.snapshot);
   els.roomPanel.classList.toggle("hidden", !state.roomKey);
   els.startButton.disabled = !state.isHost || !!state.snapshot;
+  if (els.leaveRoomButton) els.leaveRoomButton.style.display = state.roomKey ? "" : "none";
+  if (els.hostSettingsButton) els.hostSettingsButton.classList.toggle("hidden", !state.isHost || !state.snapshot);
   refreshActions();
   refreshCreateButton();
 
@@ -236,7 +342,13 @@ function refreshPanels() {
 
 function renderRoomShell() {
   els.roomKeyText.textContent = state.roomKey || "----";
-  els.slotText.textContent = state.mySlot ? slotLabels[state.mySlot] : "-";
+  if (state.isDualDevice && state.mySlot2) {
+    els.slotText.textContent = `${slotLabels[state.mySlot] || state.mySlot} + ${slotLabels[state.mySlot2] || state.mySlot2}`;
+  } else {
+    els.slotText.textContent = state.mySlot ? (slotLabels[state.mySlot] || state.mySlot) : "-";
+  }
+  if (els.dualDeviceBadge) els.dualDeviceBadge.classList.toggle("hidden", !state.isDualDevice);
+  if (els.hostControls) els.hostControls.style.display = state.isHost ? "" : "none";
   els.gameTitle.textContent = state.roomKey ? `在线房间 ${state.roomKey}` : "在线跳跳棋";
 }
 
@@ -275,56 +387,177 @@ function renderRoomList(rooms) {
 }
 
 function renderSeats() {
-  els.seatList.innerHTML = "";
+  // Deprecated — use drawSlotDiagram instead. Kept as no-op for safety.
+}
 
-  if (state.snapshot) {
-    // In-game: simple seat list
-    for (const seat of state.seats) {
-      const div = document.createElement("div");
-      div.className = "seat";
-      div.textContent = `${slotLabels[seat.slot] || seat.slot}: ${seat.name}${seat.isHost ? " · 房主" : ""}`;
-      els.seatList.appendChild(div);
-    }
-    return;
+// ── Hex-diagram slot picker ──────────────────────────────────────────────────
+function drawSlotDiagram() {
+  const canvas = els.slotCanvas;
+  if (!canvas) return;
+  const ctx2 = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx2.clearRect(0, 0, W, H);
+
+  const cx = W / 2, cy = H / 2;
+  const orb = Math.min(W, H) * 0.36;  // orbit radius
+  const nodeR = Math.min(W, H) * 0.1;  // node circle radius
+  const allSlots = ["Top", "TopRight", "BottomRight", "Bottom", "BottomLeft", "TopLeft"];
+
+  // Draw lines connecting opposite pairs
+  for (const slot of allSlots) {
+    const ang = slotAngles[slot] * Math.PI / 180;
+    const x = cx + orb * Math.cos(ang);
+    const y = cy + orb * Math.sin(ang);
+    const oppSlot = oppositeOf(slot);
+    const oppAng = slotAngles[oppSlot] * Math.PI / 180;
+    const ox = cx + orb * Math.cos(oppAng);
+    const oy = cy + orb * Math.sin(oppAng);
+    ctx2.save();
+    ctx2.strokeStyle = "rgba(180,190,200,0.35)";
+    ctx2.lineWidth = 1.5;
+    ctx2.setLineDash([4, 4]);
+    ctx2.beginPath();
+    ctx2.moveTo(x, y);
+    ctx2.lineTo(ox, oy);
+    ctx2.stroke();
+    ctx2.restore();
   }
 
-  // Lobby: interactive slot picker — show all 6 positions
-  const allSlots = ["Top", "TopRight", "BottomRight", "Bottom", "BottomLeft", "TopLeft"];
+  // Draw center hex outline
+  ctx2.save();
+  ctx2.strokeStyle = "rgba(180,190,200,0.25)";
+  ctx2.lineWidth = 1.5;
+  ctx2.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const ang = (slotAngles[allSlots[i]]) * Math.PI / 180;
+    const x = cx + orb * Math.cos(ang);
+    const y = cy + orb * Math.sin(ang);
+    if (i === 0) ctx2.moveTo(x, y); else ctx2.lineTo(x, y);
+  }
+  ctx2.closePath();
+  ctx2.stroke();
+  ctx2.restore();
+
+  // Determine which slots are "mine"
+  const mySlotSet = new Set(state.mySlots);
+
+  // Draw each slot node
   for (const slot of allSlots) {
+    const ang = slotAngles[slot] * Math.PI / 180;
+    const x = cx + orb * Math.cos(ang);
+    const y = cy + orb * Math.sin(ang);
     const seat = state.seats.find(s => s.slot === slot);
-    const isMe = slot === state.mySlot;
-    const taken = !!seat && !isMe;
+    const isMe = mySlotSet.has(slot);
+    const isTakenByOther = !!seat && !isMe;
+    const isEmpty = !seat;
 
-    const div = document.createElement("div");
-    div.className = `slot-pick-item${isMe ? " my-slot" : ""}${taken ? " taken" : ""}`;
+    // Background
+    ctx2.save();
+    ctx2.beginPath();
+    ctx2.arc(x, y, nodeR, 0, Math.PI * 2);
+    const baseColor = pieceColors[slot] || "rgb(200,200,200)";
+    ctx2.fillStyle = isMe ? baseColor : (isTakenByOther ? shadeRgb(baseColor, -30) : "rgba(240,245,250,0.9)");
+    ctx2.fill();
 
-    const dot = document.createElement("span");
-    dot.className = "slot-dot";
-    dot.style.background = pieceColors[slot];
-    div.appendChild(dot);
+    // Ring
+    ctx2.lineWidth = isMe ? 3 : 1.5;
+    ctx2.strokeStyle = isMe ? "rgba(255,255,255,0.9)" : (isEmpty ? "rgba(180,190,200,0.6)" : baseColor);
+    ctx2.stroke();
+    ctx2.restore();
 
-    const labelSpan = document.createElement("span");
-    labelSpan.className = "slot-pick-label";
-    labelSpan.textContent = slotLabels[slot] || slot;
-    div.appendChild(labelSpan);
-
-    const occupantSpan = document.createElement("span");
-    occupantSpan.className = "slot-pick-occupant";
-    occupantSpan.textContent = seat ? seat.name + (seat.isHost ? " · 房主" : "") : "空位";
-    div.appendChild(occupantSpan);
-
-    if (!taken) {
-      div.title = isMe ? "当前位置" : "点击选择此位置";
-      div.addEventListener("click", () => {
-        if (!isMe) send({ type: "SELECT_SLOT", slot });
-      });
+    // Host badge
+    if (seat && seat.isHost) {
+      ctx2.save();
+      ctx2.font = `bold ${Math.round(nodeR * 0.55)}px -apple-system, sans-serif`;
+      ctx2.fillStyle = "rgba(180, 80, 60, 0.9)";
+      ctx2.textAlign = "center";
+      ctx2.textBaseline = "middle";
+      ctx2.fillText("★", x, y - nodeR * 0.8);
+      ctx2.restore();
     }
-    els.seatList.appendChild(div);
+
+    // Slot label
+    ctx2.save();
+    ctx2.font = `700 ${Math.round(nodeR * 0.62)}px -apple-system, sans-serif`;
+    ctx2.fillStyle = isMe ? "rgba(255,255,255,0.95)" : (isTakenByOther ? "rgba(60,70,80,0.9)" : "rgba(130,150,160,0.8)");
+    ctx2.textAlign = "center";
+    ctx2.textBaseline = "middle";
+    ctx2.fillText(slotLabels[slot] || slot, x, y - nodeR * 0.22);
+    ctx2.restore();
+
+    // Name label
+    const nameLabel = seat ? seat.name : "空位";
+    ctx2.save();
+    ctx2.font = `${Math.round(nodeR * 0.48)}px -apple-system, sans-serif`;
+    ctx2.fillStyle = isMe ? "rgba(255,255,255,0.85)" : "rgba(80,90,100,0.75)";
+    ctx2.textAlign = "center";
+    ctx2.textBaseline = "middle";
+    ctx2.fillText(nameLabel.length > 5 ? nameLabel.slice(0, 5) + "…" : nameLabel, x, y + nodeR * 0.32);
+    ctx2.restore();
+
+    // Click affordance for vacant/own seats (in lobby phase)
+    if (!state.snapshot) {
+      canvas._slotHitAreas = canvas._slotHitAreas || [];
+    }
+  }
+
+  // Store hit areas for click handling (rebuilt each render)
+  canvas._slotHitAreas = allSlots.map(slot => {
+    const ang = slotAngles[slot] * Math.PI / 180;
+    return { slot, x: cx + orb * Math.cos(ang), y: cy + orb * Math.sin(ang), r: nodeR };
+  });
+}
+
+function oppositeOf(slot) {
+  const map = { Top: "Bottom", Bottom: "Top", TopRight: "BottomLeft", BottomLeft: "TopRight", TopLeft: "BottomRight", BottomRight: "TopLeft" };
+  return map[slot] || slot;
+}
+
+function handleSlotDiagramClick(event) {
+  const canvas = els.slotCanvas;
+  if (!canvas || !canvas._slotHitAreas) return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (event.clientX - rect.left) * scaleX;
+  const y = (event.clientY - rect.top) * scaleY;
+
+  for (const area of canvas._slotHitAreas) {
+    if (Math.hypot(x - area.x, y - area.y) <= area.r * 1.2) {
+      const slot = area.slot;
+      const seat = state.seats.find(s => s.slot === slot);
+      const isMe = state.mySlots.includes(slot);
+
+      if (state.snapshot) return; // can't change slots during game
+
+      if (!isMe && !seat) {
+        // Select this slot (or pair for dual-device)
+        if (state.isDualDevice) {
+          const opp = oppositeOf(slot);
+          const oppSeat = state.seats.find(s => s.slot === opp);
+          const oppIsMe = state.mySlots.includes(opp);
+          if (!oppSeat || oppIsMe) {
+            send({ type: "SELECT_SLOTS", slots: [slot, opp] });
+          } else {
+            setStatus(`${slotLabels[opp]} 已被占用，无法选择这对位置。`);
+          }
+        } else {
+          send({ type: "SELECT_SLOTS", slots: [slot] });
+        }
+      } else if (!isMe && seat && seat.clientId && state.isHost) {
+        // Host can kick by clicking occupied seat
+        if (window.confirm(`踢出 ${seat.name}？`)) {
+          send({ type: "KICK_PEER", targetClientId: seat.clientId });
+        }
+      }
+      return;
+    }
   }
 }
 
 function updateHostFlagFromSeats() {
-  const mySeat = state.seats.find(value => value.slot === state.mySlot);
+  const mySlotSet = new Set(state.mySlots);
+  const mySeat = state.seats.find(value => mySlotSet.has(value.slot));
   state.isHost = !!(mySeat && mySeat.isHost);
 }
 
@@ -390,7 +623,8 @@ function getPlayerName(slot, kind) {
 
 function refreshActions() {
   const snapshot = state.snapshot;
-  const myTurn = snapshot && snapshot.currentPlayerSlot === state.mySlot && snapshot.currentPlayerKind === "Human" && !snapshot.isGameOver;
+  const mySlotSet = new Set(state.mySlots.length ? state.mySlots : (state.mySlot ? [state.mySlot] : []));
+  const myTurn = snapshot && mySlotSet.has(snapshot.currentPlayerSlot) && snapshot.currentPlayerKind === "Human" && !snapshot.isGameOver;
   els.finishButton.disabled = !myTurn || !snapshot.hasMovedThisTurn;
   els.passButton.disabled = !myTurn || snapshot.hasMovedThisTurn;
 }
@@ -400,6 +634,18 @@ function setStatus(text) {
   els.statusText.textContent = value;
   els.loginStatusText.textContent = value;
   els.mobileStatusText.textContent = value || "请选择一个房间开始。";
+}
+
+function showHostSettings() {
+  if (els.hostSettingsModal) {
+    els.hostSettingsModal.classList.remove("hidden");
+  }
+}
+
+function hideHostSettings() {
+  if (els.hostSettingsModal) {
+    els.hostSettingsModal.classList.add("hidden");
+  }
 }
 
 function pieceBackground(color) {
@@ -437,22 +683,83 @@ function startCreateCooldown() {
   }
 }
 
+function resizeBoardCanvas() {
+  const rect = els.canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect.width || window.innerWidth || 980));
+  const height = Math.max(1, Math.round(rect.height || window.innerHeight || 980));
+  if (els.canvas.width === width && els.canvas.height === height) {
+    return false;
+  }
+
+  els.canvas.width = width;
+  els.canvas.height = height;
+  cachedCellPoints = null;
+  cachedCellRadius = -1;
+  backdropCanvas = null;
+  return true;
+}
+
+function getBoardViewport() {
+  const chromeHeight = els.gameChrome ? els.gameChrome.getBoundingClientRect().height : 0;
+  const topInset = 12;
+  const bottomInset = Math.min(els.canvas.height * 0.42, chromeHeight + 14);
+  const height = Math.max(1, els.canvas.height - topInset - bottomInset);
+  return {
+    width: els.canvas.width,
+    height,
+    centerX: els.canvas.width / 2,
+    centerY: topInset + height / 2
+  };
+}
+
 function getCellRadius() {
-  const safeMargin = 0.015;
-  const avail = els.canvas.width * (1 - 2 * safeMargin);
-  return Math.min(avail / (12 * Math.sqrt(3) + 2), avail / 26);
+  const viewport = getBoardViewport();
+  const bounds = calculateBoardBounds(1, getBoardViewRotationDegrees());
+  const boardWidth = bounds.maxX - bounds.minX;
+  const boardHeight = bounds.maxY - bounds.minY;
+  const safeMargin = unityBoard.safeMarginRatio;
+  const safeWidth = viewport.width * (1 - 2 * safeMargin);
+  const safeHeight = viewport.height * (1 - 2 * safeMargin);
+  return Math.max(1, Math.min(safeWidth / boardWidth, safeHeight / boardHeight));
+}
+
+function getBoardCenterOffset(radius) {
+  const bounds = calculateBoardBounds(radius, getBoardViewRotationDegrees());
+  return {
+    x: -(bounds.minX + bounds.maxX) / 2,
+    y: -(bounds.minY + bounds.maxY) / 2
+  };
+}
+
+function calculateBoardBounds(radius, rotationDegrees) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (const coord of cachedCells) {
+    const x = radius * Math.sqrt(3) * (coord.q + coord.r / 2);
+    const y = radius * 1.5 * coord.r;
+    const rotated = rotatePoint(x, y, rotationDegrees);
+    minX = Math.min(minX, rotated.x - radius);
+    maxX = Math.max(maxX, rotated.x + radius);
+    minY = Math.min(minY, rotated.y - radius);
+    maxY = Math.max(maxY, rotated.y + radius);
+  }
+
+  return { minX, maxX, minY, maxY };
 }
 
 function axialToPixel(coord) {
   const size = getCellRadius();
-  const centerX = els.canvas.width / 2;
-  const centerY = els.canvas.height / 2;
+  const viewport = getBoardViewport();
+  const centerOffset = getBoardCenterOffset(size);
   const x = size * Math.sqrt(3) * (coord.q + coord.r / 2);
   const y = size * 1.5 * coord.r;  // positive: matches Unity world-space y-up convention via canvas y-down flip
   const rotated = rotatePoint(x, y, getBoardViewRotationDegrees());
   return {
-    x: centerX + rotated.x,
-    y: centerY + rotated.y
+    x: viewport.centerX + centerOffset.x + rotated.x,
+    y: viewport.centerY + centerOffset.y + rotated.y
   };
 }
 
@@ -509,6 +816,7 @@ function getCachedCellPoints() {
 }
 
 function drawBoard() {
+  resizeBoardCanvas();
   const r = getCellRadius();
   ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
   drawUnityMountainBackdrop();
@@ -567,7 +875,8 @@ function drawNameLabel(x, y, name, color) {
   const width = Math.min(180, ctx.measureText(name).width + paddingX * 2);
   const height = 38;
   const left = Math.max(12, Math.min(els.canvas.width - width - 12, x - width / 2));
-  const top = Math.max(12, Math.min(els.canvas.height - height - 132, y - height / 2));
+  const chromeHeight = els.gameChrome ? els.gameChrome.getBoundingClientRect().height : 132;
+  const top = Math.max(12, Math.min(els.canvas.height - height - chromeHeight - 12, y - height / 2));
   roundRect(left, top, width, height, 8);
   ctx.fillStyle = "rgba(0,0,0,.42)";
   ctx.fill();
@@ -819,7 +1128,8 @@ function coordKey(coord) {
 }
 
 function clickBoard(event) {
-  if (!state.snapshot || state.snapshot.currentPlayerSlot !== state.mySlot || state.snapshot.currentPlayerKind !== "Human") {
+  const mySlotSet = new Set(state.mySlots.length ? state.mySlots : (state.mySlot ? [state.mySlot] : []));
+  if (!state.snapshot || !mySlotSet.has(state.snapshot.currentPlayerSlot) || state.snapshot.currentPlayerKind !== "Human") {
     return;
   }
 
@@ -851,7 +1161,7 @@ function clickBoard(event) {
   }
 
   const piece = (state.snapshot.pieces || []).find(value => value.position.q === nearest.q && value.position.r === nearest.r);
-  if (piece) {
+  if (piece && mySlotSet.has(piece.owner)) {
     send({ type: "SELECT", pieceId: piece.pieceId });
   }
 }
@@ -874,7 +1184,13 @@ function stopRenderLoop() {
 }
 
 els.loginButton.addEventListener("click", () => {
-  send({ type: "AUTH", account: els.accountInput.value.trim(), password: els.passwordInput.value });
+  const isDual = els.dualDeviceInput ? els.dualDeviceInput.checked : true;
+  savePrefs({
+    account: els.accountInput.value.trim(),
+    password: els.passwordInput.value,
+    dualDevice: isDual
+  });
+  send({ type: "AUTH", account: els.accountInput.value.trim(), password: els.passwordInput.value, dualDevice: isDual });
 });
 let adminTapTimer = null;
 document.querySelector(".brand-mark").addEventListener("click", () => {
@@ -916,10 +1232,48 @@ els.createButton.addEventListener("click", () => {
 els.joinButton.addEventListener("click", () => send({ type: "JOIN", roomKey: els.roomKeyInput.value.trim() }));
 els.refreshButton.addEventListener("click", () => send({ type: "LIST" }));
 els.startButton.addEventListener("click", () => send({ type: "START" }));
+if (els.leaveRoomButton) {
+  els.leaveRoomButton.addEventListener("click", () => {
+    if (window.confirm("确定退出当前房间？")) send({ type: "LEAVE_ROOM" });
+  });
+}
 els.finishButton.addEventListener("click", () => send({ type: "FINISH" }));
 els.passButton.addEventListener("click", () => send({ type: "PASS" }));
+if (els.hostSettingsButton) els.hostSettingsButton.addEventListener("click", showHostSettings);
+if (els.closeHostSettingsButton) els.closeHostSettingsButton.addEventListener("click", hideHostSettings);
+if (els.hostSettingsModal) {
+  els.hostSettingsModal.addEventListener("click", event => {
+    if (event.target === els.hostSettingsModal) hideHostSettings();
+  });
+}
+if (els.restartGameButton) {
+  els.restartGameButton.addEventListener("click", () => {
+    if (window.confirm("确定重开本局？当前进度不会保留。")) {
+      hideHostSettings();
+      send({ type: "RESTART_GAME" });
+    }
+  });
+}
+if (els.disbandRoomButton) {
+  els.disbandRoomButton.addEventListener("click", () => {
+    if (window.confirm("确定解散房间？所有玩家都会回到大厅。")) {
+      hideHostSettings();
+      send({ type: "DISBAND_ROOM" });
+    }
+  });
+}
 els.canvas.addEventListener("click", clickBoard);
-els.accountInput.value = localStorage.getItem("sweetJumpJumpAccount") || els.accountInput.value;
+if (els.slotCanvas) els.slotCanvas.addEventListener("click", handleSlotDiagramClick);
+window.addEventListener("resize", drawBoard);
+window.addEventListener("orientationchange", drawBoard);
+
+// Restore persisted login fields
+const prefs = loadPrefs();
+if (prefs.account) els.accountInput.value = prefs.account;
+if (prefs.password) els.passwordInput.value = prefs.password;
+if (prefs.nickname) els.nicknameInput && (els.nicknameInput.value = prefs.nickname);
+if (els.dualDeviceInput) els.dualDeviceInput.checked = prefs.dualDevice !== false; // default true
+
 refreshPanels();
 drawBoard();
 connect();

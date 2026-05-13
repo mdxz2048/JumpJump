@@ -72,6 +72,57 @@ label {
   font-weight: 700;
 }
 
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 1.5px solid rgba(179, 125, 146, .48);
+  border-radius: 5px;
+  background: rgba(255, 252, 255, .96);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.7);
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"]:checked {
+  border-color: rgb(250, 181, 207);
+  background: rgb(250, 181, 207);
+}
+
+.checkbox-label input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
+  border: solid rgb(120, 56, 79);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.checkbox-label input[type="checkbox"]:focus {
+  box-shadow: none;
+}
+
+.checkbox-label input[type="checkbox"]:focus-visible {
+  border-color: rgb(250, 181, 207);
+  box-shadow: 0 0 0 3px rgba(250, 181, 207, .28);
+}
+
 .hidden {
   display: none !important;
 }
@@ -222,11 +273,11 @@ label {
 
 .game-view {
   position: relative;
-  display: grid;
-  place-items: center;
   min-height: 100vh;
+  height: 100vh;
+  height: 100svh;
   overflow: hidden;
-  padding: 22px 22px 158px;
+  padding: 0;
   background: rgb(230, 245, 255);
 }
 
@@ -242,41 +293,63 @@ label {
   text-shadow: 0 2px 10px rgba(20, 32, 44, .26);
 }
 
+.host-settings-button {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: max(18px, env(safe-area-inset-right));
+  z-index: 4;
+  min-height: 48px;
+  padding: 0 22px;
+  border-radius: 4px;
+  background: rgba(5, 6, 8, .78);
+  color: rgba(255,255,255,.96);
+  box-shadow: none;
+}
+
+.host-settings-button:hover {
+  background: rgba(38, 42, 46, .86);
+}
+
 #boardCanvas {
-  position: relative;
+  position: absolute;
+  inset: 0;
   z-index: 1;
-  width: min(92vmin, 980px);
-  height: min(92vmin, 980px);
-  max-width: 100%;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: manipulation;
 }
 
 .game-chrome {
   position: absolute;
-  left: 24px;
-  right: 24px;
-  bottom: 20px;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 3;
-  min-height: 108px;
+  min-height: clamp(210px, 19svh, 340px);
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr;
   align-items: center;
-  gap: 18px;
+  justify-items: center;
+  gap: 14px;
   background: rgba(0, 0, 0, .48);
-  border-radius: 8px;
-  padding: 14px 24px;
+  border-radius: 0;
+  padding: 22px max(24px, env(safe-area-inset-left)) calc(22px + env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-right));
 }
 
 .turn-display {
   display: grid;
-  grid-template-columns: 62px 1fr;
+  grid-template-columns: 1fr;
   align-items: center;
-  gap: 16px;
+  justify-items: center;
+  gap: 10px;
   min-width: 0;
+  text-align: center;
 }
 
 .turn-piece {
-  width: 54px;
-  height: 54px;
+  width: 46px;
+  height: 46px;
   border-radius: 50%;
   background:
     radial-gradient(circle at 34% 32%, rgba(255,255,255,.82) 0 12%, transparent 13%),
@@ -286,29 +359,31 @@ label {
 
 .turn-text {
   color: rgba(255,255,255,.96);
-  font-size: 24px;
+  font-size: clamp(21px, 2.25svh, 30px);
   font-weight: 900;
   line-height: 1.2;
 }
 
 .mobile-status {
   color: rgba(255,255,255,.92);
-  text-align: left;
+  text-align: center;
   line-height: 1.45;
-  font-size: 18px;
+  font-size: clamp(17px, 1.55svh, 24px);
 }
 
 .game-actions {
   display: grid;
-  grid-template-columns: 180px 180px;
-  gap: 12px;
+  width: min(860px, 58vw);
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
 }
 
 .game-actions button {
-  min-height: 66px;
+  min-height: clamp(58px, 5.6svh, 82px);
   background: rgba(5, 6, 8, .88);
   color: rgba(255,255,255,.96);
   box-shadow: none;
+  font-size: clamp(18px, 1.8svh, 25px);
 }
 
 .game-actions button:hover {
@@ -324,16 +399,56 @@ label {
   color: rgba(255,255,255,.48);
 }
 
+.host-settings-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .42);
+}
+
+.host-settings-card {
+  display: grid;
+  gap: 14px;
+  width: min(430px, 100%);
+  border-radius: 8px;
+  background: rgba(255, 251, 254, .98);
+  padding: 22px;
+  box-shadow: 0 22px 64px rgba(28, 18, 24, .26);
+}
+
+.host-settings-title {
+  color: rgb(120, 56, 79);
+  font-size: 24px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.secondary-button {
+  background: rgba(221, 214, 219, .82);
+  color: rgba(120, 56, 79, .82);
+}
+
+.danger-button {
+  background: rgba(190, 48, 70, .9);
+  color: rgba(255,255,255,.96);
+}
+
+.danger-button:hover {
+  background: rgba(210, 58, 82, .94);
+}
+
 @media (max-width: 900px) {
   .lobby-grid {
     grid-template-columns: 1fr;
   }
 
   .game-chrome {
-    grid-template-columns: 1fr;
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
+    min-height: clamp(190px, 22svh, 300px);
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
   }
 
   .game-actions {

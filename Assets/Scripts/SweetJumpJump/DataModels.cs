@@ -142,6 +142,7 @@ namespace SweetJumpJump
         public string OnlinePlayerName = string.Empty;
         public string OnlinePlayerAccount = string.Empty;
         public string OnlinePlayerPassword = string.Empty;
+        public bool OnlineDualDevice = true;
     }
 
     // ---- Online protocol data models (WebSocket / new server) ----
@@ -190,6 +191,8 @@ namespace SweetJumpJump
         public string name;
         public string kind;
         public bool isHost;
+        public string clientId;
+        public bool isDualDevice;
     }
 
     [Serializable]
