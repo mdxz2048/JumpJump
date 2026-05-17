@@ -7,16 +7,17 @@
 | macOS | 开发机 |
 | Unity | `2022.3.62f3` |
 | Xcode | 与 iOS 目标匹配的版本 |
-| .NET SDK | 7+ （用于编译服务端） |
-| iPad | 真机（已验证 iPad Air 11-inch） |
+| .NET SDK | 7+ |
+| iPad | 真机 |
 | Apple 证书 | Apple Development 证书 + 可用 Team（自动签名） |
 
-**Unity 工程设置**（由 `StageThreeBuildTools.ConfigureIPadBuild()` 自动写入）：
+Unity 工程设置由 `StageThreeBuildTools.ConfigureIPadBuild()` 自动写入：
 
 - Product Name：`甜姐的跳跳棋`
 - Bundle ID：`com.lvzhipeng.sweetjumpjump`
 - iOS Team ID：`J3M89K2N56`
-- iOS Target：`iPhoneAndiPad`，Target OS ≥ 13.0
+- iOS Target：`iPhoneAndiPad`
+- Target OS：`13.0+`
 - Orientation：Portrait
 - Scripting Backend：IL2CPP
 
@@ -40,13 +41,7 @@
   -logFile /tmp/sweetjumpjump_stage3.log
 ```
 
-成功日志应包含：
-
-```text
-StageOneVerifier passed
-StageTwoVerifier passed
-StageThreeVerifier passed: stage one/two regressions, portrait iPad settings, and iOS export readiness.
-```
+成功日志应包含 `StageOneVerifier passed`、`StageTwoVerifier passed`、`StageThreeVerifier passed`。
 
 ---
 
@@ -64,7 +59,7 @@ Unity 菜单：`Tools/SweetJumpJump/Export Xcode Project`
   -logFile /tmp/sweetjumpjump_export.log
 ```
 
-导出目录：`Builds/iOS/`（不提交到 Git，其他机器需重新导出）。
+导出目录：`Builds/iOS/`
 
 ---
 
@@ -75,82 +70,112 @@ Unity 菜单：`Tools/SweetJumpJump/Export Xcode Project`
   -project '/path/to/SweetJumpJump/Builds/iOS/Unity-iPhone.xcodeproj' \
   -scheme Unity-iPhone \
   -destination 'id=<IPAD_DEVICE_ID>' \
-  -configuration Debug \
-  -derivedDataPath /tmp/sweetjumpjump-ios-dd \
-  -allowProvisioningUpdates \
+  -configuration Release \
   build
 ```
 
 成功日志应包含：`** BUILD SUCCEEDED **`
 
-常见非阻塞警告：`A 1024x1024 app store icon is required for iOS apps`（不影响真机安装，上架前补齐）。
+常见警告：
+
+- `A 1024x1024 app store icon is required for iOS apps`：不影响真机安装，但上架前要补齐
+- Unity 生成的少量 iOS 过时 API 警告：当前不阻塞构建
 
 ---
 
 ## 四、安装到 iPad
 
-查设备 ID：
+查设备：
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-/usr/bin/xcrun devicectl list devices
+/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild \
+  -showdestinations \
+  -scheme Unity-iPhone \
+  -project '/path/to/SweetJumpJump/Builds/iOS/Unity-iPhone.xcodeproj'
 ```
 
-安装：
+如果需要命令行安装，可使用：
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 /usr/bin/xcrun devicectl device install app \
   --device <IPAD_DEVICE_ID> \
-  /tmp/sweetjumpjump-ios-dd/Build/Products/Debug-iphoneos/甜姐的跳跳棋.app
-```
-
-启动：
-
-```bash
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-/usr/bin/xcrun devicectl device process launch \
-  --device <IPAD_DEVICE_ID> \
-  com.lvzhipeng.sweetjumpjump
-```
-
-成功日志应包含：
-
-```text
-App installed
-Launched application with com.lvzhipeng.sweetjumpjump bundle identifier.
+  '/path/to/DerivedData/Build/Products/Release-iphoneos/ProductName.app'
 ```
 
 ---
 
-## 五、服务端部署
-
-### 本地开发
+## 五、本地服务端运行
 
 ```bash
 dotnet run --project Server/SweetJumpJump.Server.csproj -- 53333
 ```
 
-访问 `http://127.0.0.1:53333/` 进入网页端。
+访问：
 
-### 生产部署（Linux 示例）
-
-```bash
-dotnet publish Server/SweetJumpJump.Server.csproj -c Release -o /opt/sweetjumpjump
-# 确保 Web/ 目录在 /opt/sweetjumpjump/ 同级或通过环境变量指定路径
-/opt/sweetjumpjump/SweetJumpJump.Server 53333
+```text
+http://127.0.0.1:53333/
 ```
 
-服务端在启动时自动查找 `Web/` 目录（当前目录或父目录），提供静态文件服务。
+说明：
 
-### 服务端默认账号
+- 服务端会自动托管 `Web/` 静态网页
+- `/ws` 为 WebSocket 入口
+- `/health` 为健康检查接口
+- 账号数据持久化到 `data/accounts.json`
+
+## 六、生产部署
+
+### 生产机当前结构
+
+- systemd 服务：`sweetjumpjump`
+- 工作目录：`/opt/sweetjumpjump`
+- 可执行文件：`/opt/sweetjumpjump/SweetJumpJumpServer`
+- 静态网页目录：`/opt/sweetjumpjump/Web`
+- systemd 环境：`ASPNETCORE_URLS=http://127.0.0.1:53333`
+
+### 只发布网页端
+
+```bash
+rsync -av --delete Web/ root@<server>:/opt/sweetjumpjump/Web/
+```
+
+静态文件直接从磁盘提供，通常不需要重启服务；如需保险，可执行：
+
+```bash
+ssh root@<server> 'systemctl restart sweetjumpjump'
+```
+
+### 发布服务端 + 网页端
+
+本地发布：
+
+```bash
+dotnet publish Server/SweetJumpJump.Server.csproj -c Release -o /tmp/sweetjumpjump-publish
+cp -R Web /tmp/sweetjumpjump-publish/Web
+```
+
+上传并替换：
+
+```bash
+rsync -av --delete /tmp/sweetjumpjump-publish/ root@<server>:/opt/sweetjumpjump/
+ssh root@<server> 'systemctl restart sweetjumpjump && systemctl status sweetjumpjump --no-pager'
+```
+
+### 线上检查
+
+```bash
+curl -I https://jump.mddxz.top/
+curl https://jump.mddxz.top/health
+```
+
+## 七、默认账号与管理员
 
 | 账号 | 密码 |
 |------|------|
 | `tian` | `tian` |
 | `mdxz` | `mdxz` |
-
-账号数据保存在内存，服务重启后恢复默认。
 
 管理员密钥：`xiaozhi2048-admin`（首页连续点圆形标记 7 次进入管理入口）。
 

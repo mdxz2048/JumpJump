@@ -2,17 +2,17 @@
 
 ## 总览
 
-项目由四个主要部分组成：
+项目由五个主要部分组成：
 
 | 部分 | 路径 | 职责 |
 |------|------|------|
-| Unity 客户端 | `Assets/Scripts/SweetJumpJump/` | 规则、UI、存档、在线网络（iOS/编辑器） |
+| Unity 客户端 | `Assets/Scripts/SweetJumpJump/` | 规则、UI、存档、在线网络、iPad 登录与大厅 |
 | 编辑器工具 | `Assets/Scripts/Editor/` | 阶段验证、iOS 导出 |
 | 共享规则库 | `Shared/SweetJumpJump.Core/` | 服务端与客户端共享的数据模型 + 规则核心（.NET） |
-| 服务端 | `Server/` | ASP.NET Core WebSocket 服务，账号/房间/裁判 |
+| 服务端 | `Server/` | ASP.NET Core WebSocket 服务，认证、房间、裁判、AI 步进 |
 | 网页端 | `Web/` | 静态 HTML/CSS/JS，通过 WebSocket 参与对局 |
 
-棋盘、棋子、雪山背景、音效、背景音乐全部由 C# 在运行时程序化生成，无外部美术资源依赖。
+服务端是在线模式的唯一权威状态源。Unity 和网页端都只发送操作意图，最终结果以服务端广播的 `STATE` 快照为准。
 
 ---
 
@@ -129,11 +129,13 @@
 **在线模式**
 
 - `onlineMode` 标志区分本地/在线对局。
+- iPad 端必须先登录，登录成功后才能进入大厅。
 - `OnlineClient`（`OnlineNetworking.cs`）：后台线程维护 WebSocket 连接，线程安全入队收到的消息。
 - `Update()` 中 `TryDequeue` 消费消息，处理 `WELCOME`、`AUTH_OK`、`STATE`、`ROOM`、`LOBBY`、`ROOM_LIST`、`ERROR`、`DISCONNECTED` 等类型。
 - `STATE` 消息驱动 `GameSession` 状态同步（由服务端裁判，客户端只渲染）。
 - 在线模式下悔棋按钮不可用（`undoButton.interactable = false`）。
 - 棋盘各阵营角落显示玩家昵称，仅在 `onlineMode` 下展示。
+- 自动完成提醒为 10 秒倒计时，临近结束高亮。
 
 ---
 
@@ -176,13 +178,17 @@
 |------|------|
 | `ClientPeer` | 单个 WebSocket 连接，含账号、房间、主机标记 |
 | `GameRoom` | 在线房间，含 `GameSession`、座位分配、AI 槽位 |
-| `PlayerAccount` | 账号/密码/昵称，存内存（重启恢复默认） |
+| `PlayerAccount` | 账号/密码/昵称，启动时加载并持久化到 `data/accounts.json` |
 
-**账号系统**
+**账号与会话**
 
 - 内置账号：`tian/tian`、`mdxz/mdxz`。
+- 账号持久化到 `data/accounts.json`。
 - 管理员通过 `ADMIN_AUTH` + 密钥 `xiaozhi2048-admin` 进入，可用 `ADD_PLAYER` 新增账号。
-- 同一账号不允许多处同时登录。
+- 登录成功后签发 `sessionToken`。
+- 支持 `AUTH_TOKEN` 自动登录。
+- 同账号重复登录时支持强制接管。
+- 断线后服务端可尝试按账号恢复房间和座位。
 
 **房间管理**
 
@@ -195,7 +201,7 @@
 
 - `START` 后 `GameRoom` 持有 `GameSession`（来自共享库）。
 - `SELECT`/`MOVE`/`FINISH`/`PASS` 指令由服务端调用 `GameSession` 执行，广播 `STATE` 快照给所有房间成员。
-- AI 槽位由服务端自动驱动（房主可设置哪些座位为 AI）。
+- AI 由服务端步进执行，并在步与步之间加入短暂停顿。
 
 ---
 
@@ -206,7 +212,11 @@
 - 纯静态，由服务端 `UseStaticFiles` 托管。
 - 与服务端通过同一 WebSocket 协议通信。
 - 棋盘使用 Canvas 2D 绘制，视觉参数与 Unity 端对齐（相同颜色常量、相同格子尺寸比例）。
-- 棋盘旋转为"自己的棋在下方"，各角落显示玩家昵称。
+- 登录成功后保存 `sessionToken` 到 `localStorage`。
+- 刷新后优先用 `AUTH_TOKEN` 自动恢复登录。
+- 棋盘固定视角为“自己的棋在下方”，各角落显示玩家昵称。
+- 底部栏显示当前身份对应的棋子。
+- 自动完成提醒改为底部栏 10 秒倒计时。
 - 大厅显示可加入的发现房间列表。
 
 ---
@@ -222,8 +232,10 @@
 | `StageTwoVerifier.cs` | `Tools/SweetJumpJump/Verify Stage Two` | 验证房间校验、悔棋、空跳、三档 AI |
 | `StageThreeBuildTools.cs` | `Tools/SweetJumpJump/Verify Stage Three` / `Export Xcode Project` | 运行一/二阶段回归、配置 iPad 参数、导出 Xcode 工程到 `Builds/iOS` |
 
-## 当前已知取舍
+## 生产部署拓扑
 
-- 当前为本地单机，未实现联网/局域网/账号/广告。
-- UI 为代码生成，利于版本控制，但不适合非程序同学在 Unity Inspector 里拖拽编辑。
-- 程序化美术资源便于提交和复现，但如果后续有正式美术，应迁移到 `Assets/Art/` 并保留 `.meta` 文件。
+- Linux 服务器通过 systemd 运行 `sweetjumpjump`
+- 工作目录：`/opt/sweetjumpjump`
+- 可执行文件：`/opt/sweetjumpjump/SweetJumpJumpServer`
+- 静态网页目录：`/opt/sweetjumpjump/Web`
+- 反向代理和 HTTPS 由服务器环境负责，服务本体监听本机 `127.0.0.1:53333`

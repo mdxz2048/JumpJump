@@ -371,6 +371,15 @@ label {
   font-size: clamp(17px, 1.55svh, 24px);
 }
 
+.mobile-status.auto-finish-countdown {
+  font-weight: 800;
+  color: rgba(255,255,255,.96);
+}
+
+.mobile-status.auto-finish-urgent {
+  color: rgb(255, 214, 126);
+}
+
 .game-actions {
   display: grid;
   width: min(860px, 58vw);

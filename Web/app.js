@@ -88,7 +88,21 @@ const state = {
   createCooldownUntil: 0,
   createCooldownTimer: 0,
   piecePulses: new Map(),
-  renderLoopId: null
+  renderLoopId: null,
+  sessionToken: "",
+  autoAuthPending: false,
+  reconnectTimer: 0,
+  manualDisconnect: false,
+  pendingAuthCommand: null,
+  autoFinishReminderTimer: 0,
+  autoFinishSubmitTimer: 0,
+  autoFinishCountdown: null,
+  autoFinishWarningVisible: false,
+  nameLabelsVisibleUntil: 0,
+  boardNameTapAt: 0,
+  audioContext: null,
+  audioEnabled: false,
+  lastSnapshotSoundKey: ""
 };
 
 const els = {
@@ -143,22 +157,49 @@ const els = {
   currentTurnText: document.getElementById("currentTurnText"),
   gameTitle: document.getElementById("gameTitle"),
   canvas: document.getElementById("boardCanvas"),
-  gameChrome: document.querySelector(".game-chrome")
+  gameChrome: document.querySelector(".game-chrome"),
+  autoFinishReminderModal: document.getElementById("autoFinishReminderModal"),
+  autoFinishReminderCloseButton: document.getElementById("autoFinishReminderCloseButton")
 };
 
 const ctx = els.canvas.getContext("2d");
 
 function connect() {
+  if (state.reconnectTimer) {
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = 0;
+  }
+
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   state.ws = new WebSocket(`${protocol}//${location.host}/ws`);
-  state.ws.addEventListener("open", () => setStatus("已连接服务器，请登录。"));
+  state.ws.addEventListener("open", () => {
+    if (state.sessionToken) {
+      state.autoAuthPending = true;
+      setStatus("已连接服务器，正在自动登录...");
+      sendAuthToken(false);
+      return;
+    }
+
+    setStatus("已连接服务器，请登录。");
+  });
   state.ws.addEventListener("message", event => handleMessage(JSON.parse(event.data)));
   state.ws.addEventListener("close", () => {
-    setStatus("连接已断开。");
-    state.authed = false;
-    state.roomKey = "";
-    state.snapshot = null;
+    clearAutoFinishReminder();
+    setStatus("连接已断开，正在重连...");
+    if (!state.sessionToken || state.adminAuthed) {
+      state.authed = false;
+      state.adminAuthed = false;
+      state.roomKey = "";
+      state.snapshot = null;
+    }
     refreshPanels();
+
+    if (!state.manualDisconnect && !state.reconnectTimer) {
+      state.reconnectTimer = window.setTimeout(() => {
+        state.reconnectTimer = 0;
+        connect();
+      }, 2000);
+    }
   });
 }
 
@@ -178,15 +219,18 @@ function handleMessage(message) {
       break;
     case "AUTH_OK":
       state.authed = true;
+      state.autoAuthPending = false;
       state.account = message.account || els.accountInput.value.trim();
       state.displayName = message.name || state.account;
       state.isDualDevice = !!message.dualDevice;
+      state.sessionToken = message.sessionToken || state.sessionToken;
       els.nicknameInput.value = state.displayName;
       savePrefs({
         account: els.accountInput.value.trim(),
-        password: els.passwordInput.value,
+        password: "",
         nickname: state.displayName,
-        dualDevice: state.isDualDevice
+        dualDevice: state.isDualDevice,
+        sessionToken: state.sessionToken
       });
       // Apply preferred slots if returned
       if (message.preferredSlots && message.preferredSlots.length > 0) {
@@ -194,6 +238,12 @@ function handleMessage(message) {
       }
       setStatus(message.message || "进入成功。");
       refreshPanels();
+      break;
+    case "SESSION_REPLACED":
+      resetLoginState(message.message || "你的账号已在另一个地方登录，本端已下线。", true);
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.close();
+      }
       break;
     case "ADMIN_OK":
       state.adminAuthed = true;
@@ -213,6 +263,23 @@ function handleMessage(message) {
       setStatus(message.message || "昵称已更新。");
       break;
     case "ERROR":
+      playSfx("error");
+      if (message.code === "AUTH_DUPLICATE") {
+        state.autoAuthPending = false;
+        confirmAccountTakeover(message.message);
+        break;
+      }
+
+      if (message.code === "SESSION_REPLACED") {
+        resetLoginState(message.message || "你的账号已在另一个地方登录，本端已下线。", true);
+        break;
+      }
+
+      if (state.autoAuthPending && (message.code === "AUTH_EXPIRED" || message.code === "AUTH_DISABLED")) {
+        state.autoAuthPending = false;
+        resetLoginState(message.message || "登录已过期，请重新登录。", true);
+        break;
+      }
       setStatus(message.message || "操作失败。");
       break;
     case "ROOM_LIST":
@@ -227,6 +294,7 @@ function handleMessage(message) {
       state.isHost = !!message.isHost;
       state.snapshot = null;
       state.seats = [];
+      clearPlayerNameLabels();
       setStatus(message.message);
       refreshPanels();
       renderRoomShell();
@@ -249,6 +317,7 @@ function handleMessage(message) {
       break;
     case "LOBBY_RETURN":
       // Returned to lobby after explicit leave
+      clearAutoFinishReminder();
       state.roomKey = "";
       state.mySlot = "";
       state.mySlot2 = "";
@@ -256,11 +325,13 @@ function handleMessage(message) {
       state.seats = [];
       state.snapshot = null;
       state.isHost = false;
+      clearPlayerNameLabels();
       setStatus(message.message || "已退出房间。");
       refreshPanels();
       drawSlotDiagram();
       break;
     case "KICKED":
+      clearAutoFinishReminder();
       state.roomKey = "";
       state.mySlot = "";
       state.mySlot2 = "";
@@ -268,11 +339,13 @@ function handleMessage(message) {
       state.seats = [];
       state.snapshot = null;
       state.isHost = false;
+      clearPlayerNameLabels();
       setStatus(message.message || "你已被房主移出房间。");
       refreshPanels();
       drawSlotDiagram();
       break;
     case "ROOM_DISBANDED":
+      clearAutoFinishReminder();
       state.roomKey = "";
       state.mySlot = "";
       state.mySlot2 = "";
@@ -281,6 +354,7 @@ function handleMessage(message) {
       state.snapshot = null;
       state.selectedPieceId = -1;
       state.isHost = false;
+      clearPlayerNameLabels();
       hideHostSettings();
       setStatus(message.message || "房间已被房主解散。");
       refreshPanels();
@@ -289,6 +363,7 @@ function handleMessage(message) {
       break;
     case "STATE": {
       const prevPieces = state.snapshot ? (state.snapshot.pieces || []) : [];
+      const prevSnapshot = state.snapshot;
       state.roomKey = message.roomKey || state.roomKey;
       state.snapshot = message.snapshot;
       state.seats = message.seats || state.seats;
@@ -313,11 +388,177 @@ function handleMessage(message) {
       renderRoomShell();
       drawSlotDiagram();
       renderCurrentTurn();
+      playStateSfx(prevSnapshot, state.snapshot);
+      syncAutoFinishReminder(prevSnapshot, state.snapshot);
       drawBoard();
       refreshActions();
       refreshPanels();
       break;
     }
+  }
+}
+
+function resetLoginState(message, clearToken) {
+  clearAutoFinishReminder();
+  state.authed = false;
+  state.adminAuthed = false;
+  state.autoAuthPending = false;
+  state.pendingAuthCommand = null;
+  state.account = "";
+  state.displayName = "";
+  state.roomKey = "";
+  state.mySlot = "";
+  state.mySlot2 = "";
+  state.mySlots = [];
+  state.isDualDevice = false;
+  state.isHost = false;
+  state.snapshot = null;
+  state.seats = [];
+  state.selectedPieceId = -1;
+  clearPlayerNameLabels();
+  if (clearToken) {
+    state.sessionToken = "";
+    savePrefs({ sessionToken: "", password: "" });
+  }
+  setStatus(message || "");
+  refreshPanels();
+  drawSlotDiagram();
+  drawBoard();
+}
+
+function buildPasswordAuthCommand(force) {
+  return {
+    type: "AUTH",
+    account: els.accountInput.value.trim(),
+    password: els.passwordInput.value,
+    dualDevice: els.dualDeviceInput ? els.dualDeviceInput.checked : true,
+    force: !!force
+  };
+}
+
+function sendPasswordAuth(force) {
+  state.pendingAuthCommand = buildPasswordAuthCommand(force);
+  send(state.pendingAuthCommand);
+}
+
+function sendAuthToken(force) {
+  state.pendingAuthCommand = {
+    type: "AUTH_TOKEN",
+    sessionToken: state.sessionToken,
+    dualDevice: els.dualDeviceInput ? !!els.dualDeviceInput.checked : true,
+    force: !!force
+  };
+  send(state.pendingAuthCommand);
+}
+
+function confirmAccountTakeover(message) {
+  const command = state.pendingAuthCommand;
+  if (!command) {
+    setStatus(message || "这个账号已经在其他地方登录。");
+    return;
+  }
+
+  const confirmed = window.confirm(message || "这个账号已经在其他地方登录。是否踢掉原来的登录？");
+  if (!confirmed) {
+    state.pendingAuthCommand = null;
+    setStatus("已取消登录。");
+    return;
+  }
+
+  state.pendingAuthCommand = { ...command, force: true };
+  send(state.pendingAuthCommand);
+}
+
+function isMyTurnSnapshot(snapshot) {
+  if (!snapshot) return false;
+  const mySlotSet = new Set(state.mySlots.length ? state.mySlots : (state.mySlot ? [state.mySlot] : []));
+  return mySlotSet.has(snapshot.currentPlayerSlot) && snapshot.currentPlayerKind === "Human" && !snapshot.isGameOver;
+}
+
+function shouldTrackAutoFinish(snapshot) {
+  return !!snapshot && isMyTurnSnapshot(snapshot) && !!snapshot.hasMovedThisTurn;
+}
+
+function clearAutoFinishReminder() {
+  if (state.autoFinishReminderTimer) {
+    window.clearInterval(state.autoFinishReminderTimer);
+    state.autoFinishReminderTimer = 0;
+  }
+
+  if (state.autoFinishSubmitTimer) {
+    window.clearTimeout(state.autoFinishSubmitTimer);
+    state.autoFinishSubmitTimer = 0;
+  }
+
+  if (els.mobileStatusText) {
+    els.mobileStatusText.classList.remove("auto-finish-countdown", "auto-finish-urgent");
+    els.mobileStatusText.textContent = state.snapshot?.statusMessage || els.statusText.textContent || "请选择一个房间开始。";
+  }
+
+  if (els.autoFinishReminderModal) {
+    els.autoFinishReminderModal.classList.add("hidden");
+  }
+
+  state.autoFinishWarningVisible = false;
+  state.autoFinishCountdown = null;
+}
+
+function startAutoFinishReminder() {
+  clearAutoFinishReminder();
+  state.autoFinishCountdown = 10;
+  renderAutoFinishBar();
+  state.autoFinishReminderTimer = window.setInterval(() => {
+    if (!shouldTrackAutoFinish(state.snapshot)) {
+      clearAutoFinishReminder();
+      return;
+    }
+
+    state.autoFinishCountdown--;
+    state.autoFinishWarningVisible = state.autoFinishCountdown <= 3;
+    renderAutoFinishBar();
+
+    if (state.autoFinishCountdown === 3) {
+      setStatus("还有 3 秒将自动完成移动；你也可以现在点“完成移动”。");
+      playSfx("prompt");
+    }
+
+    if (state.autoFinishCountdown <= 0) {
+      clearAutoFinishReminder();
+      send({ type: "FINISH" });
+      setStatus("已自动完成移动。");
+      playSfx("finish");
+    }
+  }, 1000);
+}
+
+function renderAutoFinishBar() {
+  if (!els.mobileStatusText) return;
+  if (!shouldTrackAutoFinish(state.snapshot) || state.autoFinishCountdown == null) {
+    els.mobileStatusText.classList.remove("auto-finish-countdown", "auto-finish-urgent");
+    return;
+  }
+
+  const highlight = state.autoFinishCountdown <= 3;
+  els.mobileStatusText.classList.toggle("auto-finish-countdown", true);
+  els.mobileStatusText.classList.toggle("auto-finish-urgent", highlight);
+  els.mobileStatusText.textContent = state.autoFinishCountdown > 0
+    ? `你已完成移动，将在 ${state.autoFinishCountdown} 秒后自动完成；如已完成可直接点“完成移动”`
+    : "已自动完成。";
+}
+
+function syncAutoFinishReminder(prevSnapshot, nextSnapshot) {
+  const beforeTrack = shouldTrackAutoFinish(prevSnapshot);
+  const afterTrack = shouldTrackAutoFinish(nextSnapshot);
+
+  if (!afterTrack) {
+    clearAutoFinishReminder();
+    return;
+  }
+
+  if (!beforeTrack) {
+    startAutoFinishReminder();
+  } else {
+    renderAutoFinishBar();
   }
 }
 
@@ -336,6 +577,7 @@ function refreshPanels() {
   if (state.authed && !!state.snapshot) {
     startRenderLoop();
   } else {
+    clearAutoFinishReminder();
     stopRenderLoop();
   }
 }
@@ -364,6 +606,115 @@ function renderCurrentTurn() {
   const name = getPlayerName(slot, snapshot.currentPlayerKind);
   els.currentTurnText.textContent = `轮到 ${name} · ${slotLabels[slot] || slot}`;
   els.currentTurnPiece.style.background = pieceBackground(pieceColors[slot] || "rgb(255,255,255)");
+}
+
+function ensureAudioContext() {
+  if (!state.audioContext) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      return null;
+    }
+
+    state.audioContext = new AudioContextClass();
+  }
+
+  if (state.audioContext.state === "suspended") {
+    state.audioContext.resume().catch(() => {});
+  }
+
+  state.audioEnabled = true;
+  return state.audioContext;
+}
+
+function playSfx(kind) {
+  const audio = ensureAudioContext();
+  if (!audio || !state.audioEnabled) {
+    return;
+  }
+
+  const now = audio.currentTime;
+  const gain = audio.createGain();
+  gain.connect(audio.destination);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.055, now + 0.015);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+
+  const osc = audio.createOscillator();
+  osc.connect(gain);
+  osc.type = kind === "error" ? "sawtooth" : "sine";
+
+  switch (kind) {
+    case "select":
+      osc.frequency.setValueAtTime(520, now);
+      osc.frequency.exponentialRampToValueAtTime(720, now + 0.1);
+      break;
+    case "move":
+      osc.frequency.setValueAtTime(360, now);
+      osc.frequency.exponentialRampToValueAtTime(560, now + 0.16);
+      break;
+    case "finish":
+      osc.frequency.setValueAtTime(440, now);
+      osc.frequency.exponentialRampToValueAtTime(660, now + 0.14);
+      break;
+    case "prompt":
+      osc.frequency.setValueAtTime(740, now);
+      osc.frequency.exponentialRampToValueAtTime(620, now + 0.16);
+      break;
+    case "victory":
+      osc.frequency.setValueAtTime(520, now);
+      osc.frequency.exponentialRampToValueAtTime(880, now + 0.22);
+      gain.gain.exponentialRampToValueAtTime(0.07, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35);
+      break;
+    case "error":
+      osc.frequency.setValueAtTime(180, now);
+      osc.frequency.exponentialRampToValueAtTime(120, now + 0.2);
+      break;
+    default:
+      osc.frequency.setValueAtTime(420, now);
+      break;
+  }
+
+  osc.start(now);
+  osc.stop(now + (kind === "victory" ? 0.36 : 0.2));
+}
+
+function playStateSfx(prevSnapshot, nextSnapshot) {
+  if (!prevSnapshot || !nextSnapshot) {
+    return;
+  }
+
+  const key = [
+    nextSnapshot.currentPlayerSlot,
+    nextSnapshot.selectedPieceId,
+    nextSnapshot.hasMovedThisTurn ? 1 : 0,
+    (nextSnapshot.pieces || []).map(piece => `${piece.pieceId}:${piece.position.q},${piece.position.r}`).join(";")
+  ].join("|");
+  if (state.lastSnapshotSoundKey === key) {
+    return;
+  }
+  state.lastSnapshotSoundKey = key;
+
+  const prevSelected = prevSnapshot.selectedPieceId || -1;
+  const nextSelected = nextSnapshot.selectedPieceId || -1;
+  let moved = false;
+  for (const piece of nextSnapshot.pieces || []) {
+    const prev = (prevSnapshot.pieces || []).find(value => value.pieceId === piece.pieceId);
+    if (prev && (prev.position.q !== piece.position.q || prev.position.r !== piece.position.r)) {
+      moved = true;
+      break;
+    }
+  }
+
+  if (nextSnapshot.isGameOver && !prevSnapshot.isGameOver) {
+    playSfx("victory");
+  } else if (moved) {
+    playSfx("move");
+  } else if (nextSelected > 0 && nextSelected !== prevSelected) {
+    playSfx("select");
+  } else if (prevSnapshot.currentPlayerSlot !== nextSnapshot.currentPlayerSlot) {
+    playSfx("finish");
+  }
 }
 
 function renderRoomList(rooms) {
@@ -633,6 +984,7 @@ function setStatus(text) {
   const value = text || "";
   els.statusText.textContent = value;
   els.loginStatusText.textContent = value;
+  els.mobileStatusText.classList.remove("auto-finish-countdown", "auto-finish-urgent");
   els.mobileStatusText.textContent = value || "请选择一个房间开始。";
 }
 
@@ -764,22 +1116,38 @@ function axialToPixel(coord) {
 }
 
 function getBoardViewRotationDegrees() {
-  switch (state.mySlot) {
+  const perspectiveSlot = getPerspectiveSlot();
+  switch (perspectiveSlot) {
     case "Bottom":
       return 0;
     case "BottomLeft":
-      return 60;
+      return -60;
     case "TopLeft":
-      return 120;
+      return -120;
     case "Top":
       return 180;
     case "TopRight":
-      return -120;
+      return 120;
     case "BottomRight":
-      return -60;
+      return 60;
     default:
       return 0;
   }
+}
+
+function getPerspectiveSlot() {
+  // Always keep the logged-in player's slot at the bottom.
+  // For dual-device, keep the first controlled slot at the bottom.
+  const controlled = (state.mySlots && state.mySlots.length) ? state.mySlots.filter(Boolean) : (state.mySlot ? [state.mySlot] : []);
+  if (controlled.length === 0) {
+    return "Bottom";
+  }
+  // If one slot, always Bottom
+  if (controlled.length === 1) {
+    return controlled[0];
+  }
+  // For dual-device, always keep the first slot at Bottom
+  return controlled[0];
 }
 
 function rotatePoint(x, y, degrees) {
@@ -848,6 +1216,11 @@ function drawPlayerNameLabels() {
     return;
   }
 
+  if (performance.now() >= state.nameLabelsVisibleUntil) {
+    state.nameLabelsVisibleUntil = 0;
+    return;
+  }
+
   for (const player of state.snapshot.players || []) {
     const slot = player.slotId;
     const anchor = slotCampAnchors[slot];
@@ -888,6 +1261,41 @@ function drawNameLabel(x, y, name, color) {
   ctx.textBaseline = "middle";
   ctx.fillText(name, left + width / 2, top + height / 2 + 1, width - paddingX);
   ctx.restore();
+}
+
+function revealPlayerNameLabels() {
+  if (!state.snapshot) {
+    return;
+  }
+
+  state.nameLabelsVisibleUntil = performance.now() + 5000;
+  drawBoard();
+}
+
+function maybeRevealPlayerNameLabels(event) {
+  if (!state.snapshot) {
+    state.boardNameTapAt = 0;
+    return false;
+  }
+
+  const now = performance.now();
+  const doubleClick = (event && event.detail >= 2) || (state.boardNameTapAt > 0 && now - state.boardNameTapAt <= 380);
+  state.boardNameTapAt = doubleClick ? 0 : now;
+  if (!doubleClick) {
+    return false;
+  }
+
+  if (event) {
+    event.preventDefault();
+  }
+  revealPlayerNameLabels();
+  playSfx("button");
+  return true;
+}
+
+function clearPlayerNameLabels() {
+  state.nameLabelsVisibleUntil = 0;
+  state.boardNameTapAt = 0;
 }
 
 function roundRect(x, y, width, height, radius) {
@@ -1128,6 +1536,10 @@ function coordKey(coord) {
 }
 
 function clickBoard(event) {
+  if (maybeRevealPlayerNameLabels(event)) {
+    return;
+  }
+
   const mySlotSet = new Set(state.mySlots.length ? state.mySlots : (state.mySlot ? [state.mySlot] : []));
   if (!state.snapshot || !mySlotSet.has(state.snapshot.currentPlayerSlot) || state.snapshot.currentPlayerKind !== "Human") {
     return;
@@ -1156,13 +1568,18 @@ function clickBoard(event) {
 
   const legal = new Set((state.snapshot.legalTargets || []).map(coordKey));
   if (legal.has(coordKey(nearest)) && state.selectedPieceId > 0) {
+    clearAutoFinishReminder();
+    playSfx("move");
     send({ type: "MOVE", pieceId: state.selectedPieceId, q: nearest.q, r: nearest.r });
     return;
   }
 
   const piece = (state.snapshot.pieces || []).find(value => value.position.q === nearest.q && value.position.r === nearest.r);
   if (piece && mySlotSet.has(piece.owner)) {
+    clearAutoFinishReminder();
+    playSfx("select");
     send({ type: "SELECT", pieceId: piece.pieceId });
+    return;
   }
 }
 
@@ -1184,13 +1601,14 @@ function stopRenderLoop() {
 }
 
 els.loginButton.addEventListener("click", () => {
+  state.autoAuthPending = false;
   const isDual = els.dualDeviceInput ? els.dualDeviceInput.checked : true;
   savePrefs({
     account: els.accountInput.value.trim(),
-    password: els.passwordInput.value,
+    password: "",
     dualDevice: isDual
   });
-  send({ type: "AUTH", account: els.accountInput.value.trim(), password: els.passwordInput.value, dualDevice: isDual });
+  sendPasswordAuth(false);
 });
 let adminTapTimer = null;
 document.querySelector(".brand-mark").addEventListener("click", () => {
@@ -1237,8 +1655,16 @@ if (els.leaveRoomButton) {
     if (window.confirm("确定退出当前房间？")) send({ type: "LEAVE_ROOM" });
   });
 }
-els.finishButton.addEventListener("click", () => send({ type: "FINISH" }));
-els.passButton.addEventListener("click", () => send({ type: "PASS" }));
+els.finishButton.addEventListener("click", () => {
+  ensureAudioContext();
+  clearAutoFinishReminder();
+  send({ type: "FINISH" });
+});
+els.passButton.addEventListener("click", () => {
+  ensureAudioContext();
+  clearAutoFinishReminder();
+  send({ type: "PASS" });
+});
 if (els.hostSettingsButton) els.hostSettingsButton.addEventListener("click", showHostSettings);
 if (els.closeHostSettingsButton) els.closeHostSettingsButton.addEventListener("click", hideHostSettings);
 if (els.hostSettingsModal) {
@@ -1264,15 +1690,20 @@ if (els.disbandRoomButton) {
 }
 els.canvas.addEventListener("click", clickBoard);
 if (els.slotCanvas) els.slotCanvas.addEventListener("click", handleSlotDiagramClick);
+if (els.autoFinishReminderCloseButton) {
+  els.autoFinishReminderCloseButton.addEventListener("click", clearAutoFinishReminder);
+}
+window.addEventListener("pointerdown", ensureAudioContext, { once: true });
 window.addEventListener("resize", drawBoard);
 window.addEventListener("orientationchange", drawBoard);
 
 // Restore persisted login fields
 const prefs = loadPrefs();
 if (prefs.account) els.accountInput.value = prefs.account;
-if (prefs.password) els.passwordInput.value = prefs.password;
+if (prefs.password) els.passwordInput.value = "";
 if (prefs.nickname) els.nicknameInput && (els.nicknameInput.value = prefs.nickname);
 if (els.dualDeviceInput) els.dualDeviceInput.checked = prefs.dualDevice !== false; // default true
+if (prefs.sessionToken) state.sessionToken = prefs.sessionToken;
 
 refreshPanels();
 drawBoard();

@@ -3,6 +3,8 @@ using System;
 using System.IO;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
+using UnityEditor.Callbacks;
+using UnityEditor.iOS.Xcode;
 using UnityEngine;
 
 namespace SweetJumpJump.Editor
@@ -127,6 +129,25 @@ namespace SweetJumpJump.Editor
             }
 
             Debug.Log("Mac app built at " + Path.GetFullPath(MacBuildPath));
+        }
+
+        [PostProcessBuild]
+        public static void ConfigureIosInfoPlist(BuildTarget target, string pathToBuiltProject)
+        {
+            if (target != BuildTarget.iOS)
+            {
+                return;
+            }
+
+            string plistPath = Path.Combine(pathToBuiltProject, "Info.plist");
+            PlistDocument plist = new PlistDocument();
+            plist.ReadFromFile(plistPath);
+            PlistElementDict root = plist.root;
+            root.SetString("NSLocalNetworkUsageDescription", "用于连接同一局域网内的甜姐跳跳棋服务器。");
+            PlistElementDict ats = root.CreateDict("NSAppTransportSecurity");
+            ats.SetBoolean("NSAllowsArbitraryLoads", true);
+            plist.WriteToFile(plistPath);
+            Debug.Log("Configured iOS Info.plist for local SweetJumpJump server access.");
         }
 
         private static void Assert(bool condition, string message)

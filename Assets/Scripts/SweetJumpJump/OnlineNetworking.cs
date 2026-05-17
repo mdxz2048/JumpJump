@@ -15,8 +15,10 @@ namespace SweetJumpJump
         public string clientId;
         public string account;
         public string password;
+        public string sessionToken;
         public string name;
         public string message;
+        public string code;
         public string roomKey;
         public string slot;
         public string slot2;
@@ -24,6 +26,7 @@ namespace SweetJumpJump
         public bool isHost;
         public int version;
         public bool dualDevice;
+        public bool force;
         public string targetClientId;
         public string[] slots;
         public string[] preferredSlots;
@@ -48,8 +51,10 @@ namespace SweetJumpJump
         public string type;
         public string clientId;
         public string account;
+        public string sessionToken;
         public string name;
         public string message;
+        public string code;
         public string roomKey;
         public string slot;
         public string slot2;
@@ -60,6 +65,7 @@ namespace SweetJumpJump
         public int q;
         public int r;
         public bool dualDevice;
+        public bool force;
         public string targetClientId;
     }
 
@@ -245,8 +251,10 @@ namespace SweetJumpJump
                     type = raw.type,
                     clientId = raw.clientId,
                     account = raw.account,
+                    sessionToken = raw.sessionToken,
                     name = raw.name,
                     message = raw.message,
+                    code = raw.code,
                     roomKey = raw.roomKey,
                     slot = raw.slot,
                     ruleVariant = raw.ruleVariant,
@@ -257,6 +265,7 @@ namespace SweetJumpJump
                     r = raw.r,
                     slot2 = raw.slot2,
                     dualDevice = raw.dualDevice,
+                    force = raw.force,
                     targetClientId = raw.targetClientId
                 };
 
@@ -347,6 +356,7 @@ namespace SweetJumpJump
             AppendStr(sb, "type", msg.type);
             AppendStr(sb, "account", msg.account);
             AppendStr(sb, "password", msg.password);
+            AppendStr(sb, "sessionToken", msg.sessionToken);
             AppendStr(sb, "name", msg.name);
             AppendStr(sb, "roomKey", msg.roomKey);
             AppendStr(sb, "ruleVariant", msg.ruleVariant);
@@ -354,6 +364,8 @@ namespace SweetJumpJump
             AppendStr(sb, "targetClientId", msg.targetClientId);
             if (msg.dualDevice)
                 sb.Append("\"dualDevice\":true,");
+            if (msg.force)
+                sb.Append("\"force\":true,");
             if (msg.slots != null && msg.slots.Length > 0)
             {
                 sb.Append("\"slots\":[");

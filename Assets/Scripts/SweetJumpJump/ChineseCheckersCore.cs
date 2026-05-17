@@ -208,7 +208,7 @@ namespace SweetJumpJump
             RoomConfig room = new RoomConfig();
             room.RoomId = "default-room";
             room.RoomName = "默认房间";
-            room.RuleVariant = RuleVariant.OnePieceJump;
+            room.RuleVariant = options == null ? RuleVariant.SpaceJump : options.DefaultRule;
             room.PromptEnabled = options != null && options.PromptEnabled;
             room.PromptIntervalSeconds = options != null ? options.PromptIntervalSeconds : 30;
             room.SoundEnabled = options == null || options.SoundEnabled;
@@ -227,7 +227,7 @@ namespace SweetJumpJump
             RoomConfig room = CreateDefaultRoom(options);
             room.RoomId = Guid.NewGuid().ToString("N");
             room.RoomName = string.Format("新房间 {0}", roomNumber);
-            room.RuleVariant = options == null ? RuleVariant.OnePieceJump : options.DefaultRule;
+            room.RuleVariant = options == null ? RuleVariant.SpaceJump : options.DefaultRule;
             return room;
         }
 
@@ -235,7 +235,7 @@ namespace SweetJumpJump
         {
             return new GameOptions
             {
-                DefaultRule = RuleVariant.OnePieceJump,
+                DefaultRule = RuleVariant.SpaceJump,
                 PromptEnabled = false,
                 PromptIntervalSeconds = 30,
                 SoundEnabled = true,

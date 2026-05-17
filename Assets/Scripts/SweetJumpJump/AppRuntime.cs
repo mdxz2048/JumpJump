@@ -113,6 +113,7 @@ namespace SweetJumpJump
         // 选中棋子局部高光层基准直径。
         private const float BoardBaseSelectionSize = 92f;
         private const float BoardNameRevealDurationSeconds = 5f;
+        private const float BoardNameRevealDoubleTapSeconds = 0.38f;
         private static readonly Vector2 PrimaryMenuButtonSize = new Vector2(620f, 116f);
         private static readonly Vector2 FullWidthButtonSize = new Vector2(620f, 82f);
         private static readonly Vector2 OptionButtonSize = new Vector2(620f, 78f);
@@ -172,6 +173,8 @@ namespace SweetJumpJump
         private RectTransform roomsPanel;
         private RectTransform roomEditPanel;
         private RectTransform onlinePanel;
+        private RectTransform onlineLoginSection;
+        private RectTransform onlineLobbySection;
         private RectTransform gamePanel;
         private RectTransform roomCardContainer;
         private RectTransform boardContainer;
@@ -184,6 +187,7 @@ namespace SweetJumpJump
         private GameObject onlineAiSettingsModal;
         private GameObject onlineRestartVoteModal;
         private GameObject onlineHostSettingsModal;
+        private GameObject onlineLoginConflictModal;
 
         private TMP_Text splashTitleText;
         private TMP_Text statusText;
@@ -194,10 +198,12 @@ namespace SweetJumpJump
         private TMP_Text roomEditValidationText;
         private TMP_Text onlineStatusText;
         private TMP_Text onlineRoomKeyText;
+        private TMP_Text onlineSlotPickerText;
         private TMP_Text onlineDiscoveryText;
         private TMP_Text onlineJoinRoomConfirmText;
         private TMP_Text onlineJoinRequestText;
         private TMP_Text onlineRestartVoteText;
+        private TMP_Text onlineLoginConflictText;
         private Image currentPlayerPieceImage;
 
         private Button finishTurnButton;
@@ -218,6 +224,9 @@ namespace SweetJumpJump
         private Button roomPromptIntervalButton;
         private Button onlineStartButton;
         private Button onlineHostSettingsButton;
+        private Button onlineHostRuleButton;
+        private Button onlineDualDeviceButton;
+        private Button onlineLoginButton;
         private TMP_InputField roomNameInput;
         private TMP_InputField onlineRoomKeyInput;
         private TMP_InputField onlinePlayerNameInput;
@@ -228,8 +237,16 @@ namespace SweetJumpJump
         private TMP_Text musicImportStatusText;
         private readonly Dictionary<SlotId, Button> roomSlotButtons = new Dictionary<SlotId, Button>();
         private readonly Dictionary<SlotId, Button> onlineAiSlotButtons = new Dictionary<SlotId, Button>();
+        private readonly Dictionary<SlotId, Button> onlineSlotButtons = new Dictionary<SlotId, Button>();
+        private readonly Dictionary<SlotId, Image> onlineSlotNodeImages = new Dictionary<SlotId, Image>();
+        private readonly Dictionary<SlotId, Image> onlineSlotNodeRings = new Dictionary<SlotId, Image>();
+        private readonly Dictionary<SlotId, TMP_Text> onlineSlotNodeLabels = new Dictionary<SlotId, TMP_Text>();
+        private readonly Dictionary<SlotId, TMP_Text> onlineSlotNodeNames = new Dictionary<SlotId, TMP_Text>();
+        private readonly Dictionary<SlotId, TMP_Text> onlineSlotNodeBadges = new Dictionary<SlotId, TMP_Text>();
+        private readonly Dictionary<SlotId, OnlineSeatSummary> onlineSeatsBySlot = new Dictionary<SlotId, OnlineSeatSummary>();
         private readonly List<Button> onlineDiscoveredRoomButtons = new List<Button>();
         private readonly List<string> onlineDiscoveredRoomKeys = new List<string>();
+        private readonly Dictionary<string, OnlineRoomSummary> onlineDiscoveredRooms = new Dictionary<string, OnlineRoomSummary>();
         private readonly HashSet<SlotId> onlineAiSlots = new HashSet<SlotId>();
         private RoomConfig editingRoomDraft;
         private string editingRoomOriginalId;
@@ -241,25 +258,39 @@ namespace SweetJumpJump
         private SlotId onlineSlot;
         private List<SlotId> onlineSlots = new List<SlotId>();
         private bool onlineIsDualDevice;
+        private bool onlineAuthenticated;
         private string onlineRoomKey = string.Empty;
         private string onlineClientId = string.Empty;
         private string onlineLobbySummary = string.Empty;
+        private RuleVariant onlineCurrentRoomRule = RuleVariant.SpaceJump;
         private string onlineDiscoveredRoomKey = string.Empty;
         private string onlineDiscoverySummary = string.Empty;
         private string onlineJoinConfirmRoomKey = string.Empty;
+        private string onlinePendingAction = string.Empty;
+        private string onlinePendingActionRoomKey = string.Empty;
         private string onlinePendingJoinClientId = string.Empty;
         private string onlinePendingJoinPlayerName = string.Empty;
         private string onlinePendingRestartClientId = string.Empty;
         private string onlinePendingRestartPlayerName = string.Empty;
         private int onlineHighlightedPieceId = -1;
         private int onlineLastActionSeq;
+        private string onlineLastStateSignature = string.Empty;
         private float onlineReconnectDelaySeconds;
+        private float onlineAutoFinishMovedAt = -1f;
+        private float onlineAutoFinishReminderAt = -1f;
+        private float onlineAutoFinishSubmitAt = -1f;
+        private bool onlineAutoFinishModalVisible;
+        private float lastBoardNameRevealTapAt = -1f;
+        private bool onlineIgnoreNextDisconnectedNotice;
         private float promptElapsedSeconds;
         private bool promptShown;
         private bool victorySoundPlayed;
         private bool refreshingUiText;
         private Vector2 lastBoardContainerSize;
         private ThemePalette activeTheme;
+        private BoardCellView selectedPulseView;
+        private GameObject onlineAutoFinishModal;
+        private TMP_Text onlineAutoFinishModalText;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void Bootstrap()
@@ -321,6 +352,7 @@ namespace SweetJumpJump
                 onlineClient.UpdateRetries();
             }
             UpdateOnlineReconnect();
+            UpdateOnlineAutoFinishReminder();
             UpdateBoardLayoutIfNeeded();
             UpdateBoardNameReveal();
             UpdateSelectionPulse();
@@ -544,9 +576,27 @@ namespace SweetJumpJump
         private void ShowOnline()
         {
             ApplyTheme(saveData.Options.ThemeId);
-            RefreshOnlineLobby("连接服务器后，可以创建房间或输入密钥加入。");
+            if (onlineAuthenticated && onlineClient != null && onlineClient.IsConnected)
+            {
+                onlineClient.Send(new OnlineMessage { type = "LIST" });
+                RefreshOnlineLobby("已登录，可以创建或加入房间。");
+            }
+            else
+            {
+                string acct = saveData.Options.OnlinePlayerAccount == null ? string.Empty : saveData.Options.OnlinePlayerAccount.Trim();
+                string pwd = saveData.Options.OnlinePlayerPassword ?? string.Empty;
+                string token = saveData.Options.OnlineSessionToken ?? string.Empty;
+                if (!string.IsNullOrEmpty(acct) && !string.IsNullOrEmpty(pwd) && !string.IsNullOrEmpty(token))
+                {
+                    ConnectOnlineIfNeeded();
+                    RefreshOnlineLobby("正在自动登录...");
+                }
+                else
+                {
+                    RefreshOnlineLobby("请先登录，然后进入在线大厅。");
+                }
+            }
             ShowPanel(onlinePanel);
-            ConnectOnlineIfNeeded();
         }
 
         private void ShowRoomEditor(RoomConfig roomConfig)
@@ -658,6 +708,7 @@ namespace SweetJumpJump
             }
 
             HashSet<HexCoord> legalTargets = new HashSet<HexCoord>(session.LegalTargets);
+            BoardCellView selectedView = null;
 
             foreach (KeyValuePair<HexCoord, BoardCellView> entry in cellViews)
             {
@@ -665,6 +716,10 @@ namespace SweetJumpJump
                 PieceState piece = session.GetPieceAt(view.Coord);
                 bool isTarget = legalTargets.Contains(view.Coord);
                 bool isSelected = piece != null && (piece.PieceId == session.SelectedPieceId || piece.PieceId == onlineHighlightedPieceId);
+                if (isSelected)
+                {
+                    selectedView = view;
+                }
 
                 view.BaseImage.color = isTarget
                     ? BoardTargetColor
@@ -705,6 +760,8 @@ namespace SweetJumpJump
                     }
                 }
             }
+
+            selectedPulseView = selectedView;
 
             RefreshCurrentPlayerPieceIndicator();
             RefreshBoardNameLabels();
@@ -760,26 +817,52 @@ namespace SweetJumpJump
         {
             foreach (KeyValuePair<SlotId, Button> entry in boardNameButtons)
             {
-                PlayerKind kind;
-                bool active = onlineMode && slotMap.TryGetValue(entry.Key, out kind) && kind != PlayerKind.None;
-                entry.Value.gameObject.SetActive(active);
-                entry.Value.interactable = active;
-
-                Image image = entry.Value.GetComponent<Image>();
-                if (image != null)
-                {
-                    Color tint = SoftenPieceColor(BoardLayout.GetPieceColor(entry.Key));
-                    tint.a = 0.92f;
-                    image.color = tint;
-                }
+                entry.Value.gameObject.SetActive(false);
+                entry.Value.interactable = false;
             }
         }
 
-        private void RevealBoardName(SlotId slotId)
+        private void RevealBoardNames()
         {
-            boardNameRevealUntil[slotId] = Time.unscaledTime + BoardNameRevealDurationSeconds;
+            if (session == null)
+            {
+                return;
+            }
+
+            Dictionary<SlotId, PlayerKind> slotMap = BoardLayout.GetSlotMap(session.RoomConfig);
+            float revealUntil = Time.unscaledTime + BoardNameRevealDurationSeconds;
+            SlotId[] slots = BoardLayout.GetSlotsInDisplayOrder();
+            for (int i = 0; i < slots.Length; i++)
+            {
+                PlayerKind kind;
+                if (slotMap.TryGetValue(slots[i], out kind) && kind != PlayerKind.None)
+                {
+                    boardNameRevealUntil[slots[i]] = revealUntil;
+                }
+            }
+
             RefreshBoardNameLabels();
             PlaySfx("button");
+        }
+
+        private bool TryHandleBoardNameDoubleTap()
+        {
+            if (!onlineMode || session == null)
+            {
+                lastBoardNameRevealTapAt = -1f;
+                return false;
+            }
+
+            float now = Time.unscaledTime;
+            bool doubleTap = lastBoardNameRevealTapAt > 0f && now - lastBoardNameRevealTapAt <= BoardNameRevealDoubleTapSeconds;
+            lastBoardNameRevealTapAt = doubleTap ? -1f : now;
+            if (!doubleTap)
+            {
+                return false;
+            }
+
+            RevealBoardNames();
+            return true;
         }
 
         private void UpdateBoardNameReveal()
@@ -905,6 +988,11 @@ namespace SweetJumpJump
 
         private void HandleCellClicked(HexCoord coord)
         {
+            if (TryHandleBoardNameDoubleTap())
+            {
+                return;
+            }
+
             if (session == null || session.IsGameOver || session.CurrentPlayerKind != PlayerKind.Human)
             {
                 return;
@@ -923,6 +1011,7 @@ namespace SweetJumpJump
             {
                 if (onlineMode)
                 {
+                    ClearOnlineAutoFinishReminder();
                     onlineClient.Send(new OnlineMessage
                     {
                         type = "MOVE",
@@ -948,6 +1037,7 @@ namespace SweetJumpJump
                 PieceState piece = session.GetPieceAt(coord);
                 if (piece != null && (onlineSlots.Count > 0 ? onlineSlots.Contains(piece.Owner) : piece.Owner == onlineSlot))
                 {
+                    ClearOnlineAutoFinishReminder();
                     onlineClient.Send(new OnlineMessage
                     {
                         type = "SELECT",
@@ -955,6 +1045,8 @@ namespace SweetJumpJump
                     });
                     PlaySfx("select");
                 }
+
+                ClearOnlineAutoFinishReminder();
                 return;
             }
             else if (session.TrySelectPiece(coord, out message))
@@ -980,6 +1072,7 @@ namespace SweetJumpJump
             {
                 if (IsOnlineMyTurn() && session.CanFinishTurn)
                 {
+                    ClearOnlineAutoFinishReminder();
                     onlineClient.Send(new OnlineMessage { type = "FINISH" });
                 }
                 return;
@@ -1011,6 +1104,7 @@ namespace SweetJumpJump
             {
                 if (IsOnlineMyTurn() && session.CanPass)
                 {
+                    ClearOnlineAutoFinishReminder();
                     onlineClient.Send(new OnlineMessage { type = "PASS" });
                 }
                 return;
@@ -1049,6 +1143,7 @@ namespace SweetJumpJump
             if (session.TryUndo(out message))
             {
                 ResetPromptTimer();
+                ClearOnlineAutoFinishReminder();
                 PlaySfx("button");
                 RefreshBoard();
             }
@@ -1067,12 +1162,12 @@ namespace SweetJumpJump
 
         private void CreateOnlineRoom()
         {
-            ConnectOnlineIfNeeded();
-            if (onlineClient != null && onlineClient.IsConnected)
+            if (!EnsureOnlineAuthenticatedOrQueue("CREATE", string.Empty, "正在连接并登录，稍后自动创建房间..."))
             {
-                onlineClient.Send(new OnlineMessage { type = "CREATE", ruleVariant = saveData.Options.DefaultRule.ToString() });
-                RefreshOnlineLobby("正在创建房间...");
+                return;
             }
+
+            SendQueuedOnlineAction("CREATE", string.Empty);
         }
 
         private void JoinOnlineRoom()
@@ -1084,12 +1179,12 @@ namespace SweetJumpJump
                 return;
             }
 
-            ConnectOnlineIfNeeded();
-            if (onlineClient != null && onlineClient.IsConnected)
+            if (!EnsureOnlineAuthenticatedOrQueue("JOIN", key, "正在连接并登录，稍后自动加入房间 " + key + "..."))
             {
-                onlineClient.Send(new OnlineMessage { type = "JOIN", roomKey = key });
-                RefreshOnlineLobby("正在加入房间 " + key + "...");
+                return;
             }
+
+            SendQueuedOnlineAction("JOIN", key);
         }
 
         private void JoinDiscoveredOnlineRoom()
@@ -1100,12 +1195,12 @@ namespace SweetJumpJump
                 return;
             }
 
-            ConnectOnlineIfNeeded();
-            if (onlineClient != null && onlineClient.IsConnected)
+            if (!EnsureOnlineAuthenticatedOrQueue("JOIN", onlineDiscoveredRoomKey, "正在连接并登录，稍后自动加入房间 " + onlineDiscoveredRoomKey + "..."))
             {
-                onlineClient.Send(new OnlineMessage { type = "JOIN", roomKey = onlineDiscoveredRoomKey });
-                RefreshOnlineLobby("正在加入房间 " + onlineDiscoveredRoomKey + "...");
+                return;
             }
+
+            SendQueuedOnlineAction("JOIN", onlineDiscoveredRoomKey);
         }
 
         private void RequestJoinDiscoveredRoom(string roomKey)
@@ -1117,6 +1212,100 @@ namespace SweetJumpJump
 
             onlineDiscoveredRoomKey = roomKey;
             JoinDiscoveredOnlineRoom();
+        }
+
+        private bool EnsureOnlineAuthenticatedOrQueue(string action, string roomKey, string waitingMessage)
+        {
+            ApplyOnlineAccountPassword();
+            if (!onlineAuthenticated)
+            {
+                onlinePendingAction = action;
+                onlinePendingActionRoomKey = roomKey ?? string.Empty;
+                ConnectOnlineIfNeeded();
+                RefreshOnlineLobby(waitingMessage);
+                return false;
+            }
+
+            ConnectOnlineIfNeeded();
+            if (onlineClient == null || !onlineClient.IsConnected)
+            {
+                return false;
+            }
+
+            if (!onlineAuthenticated)
+            {
+                onlinePendingAction = action;
+                onlinePendingActionRoomKey = roomKey ?? string.Empty;
+                RefreshOnlineLobby(waitingMessage);
+                return false;
+            }
+
+            return true;
+        }
+
+        private void LoginOnline()
+        {
+            ApplyOnlineAccountPassword();
+            ApplyOnlinePlayerName();
+            string acct = saveData.Options.OnlinePlayerAccount == null ? string.Empty : saveData.Options.OnlinePlayerAccount.Trim();
+            string pwd = saveData.Options.OnlinePlayerPassword ?? string.Empty;
+            if (string.IsNullOrEmpty(acct) || string.IsNullOrEmpty(pwd))
+            {
+                RefreshOnlineLobby("请先填写账号和密码。");
+                return;
+            }
+
+            string pendingAction = onlinePendingAction;
+            string pendingRoomKey = onlinePendingActionRoomKey;
+            DisconnectOnline();
+            ClearOnlineRoomState();
+            onlinePendingAction = pendingAction;
+            onlinePendingActionRoomKey = pendingRoomKey;
+            ConnectOnlineIfNeeded();
+            RefreshOnlineLobby("正在登录...");
+        }
+
+        private void LogoutOnline()
+        {
+            DisconnectOnline();
+            ClearOnlineRoomState();
+            onlineAuthenticated = false;
+            saveData.Options.OnlineSessionToken = string.Empty;
+            SaveManager.Save(saveData);
+            RefreshOnlineLobby("已退出登录。");
+        }
+
+        private void RunPendingOnlineAction()
+        {
+            if (string.IsNullOrEmpty(onlinePendingAction))
+            {
+                return;
+            }
+
+            string action = onlinePendingAction;
+            string roomKey = onlinePendingActionRoomKey;
+            onlinePendingAction = string.Empty;
+            onlinePendingActionRoomKey = string.Empty;
+            SendQueuedOnlineAction(action, roomKey);
+        }
+
+        private void SendQueuedOnlineAction(string action, string roomKey)
+        {
+            if (onlineClient == null || !onlineClient.IsConnected || !onlineAuthenticated)
+            {
+                return;
+            }
+
+            if (action == "CREATE")
+            {
+                onlineClient.Send(new OnlineMessage { type = "CREATE", ruleVariant = saveData.Options.DefaultRule.ToString() });
+                RefreshOnlineLobby("正在创建房间...");
+            }
+            else if (action == "JOIN")
+            {
+                onlineClient.Send(new OnlineMessage { type = "JOIN", roomKey = roomKey });
+                RefreshOnlineLobby("正在加入房间 " + roomKey + "...");
+            }
         }
 
         private void ShowOnlineAiSettings()
@@ -1165,8 +1354,45 @@ namespace SweetJumpJump
 
             if (onlineHostSettingsModal != null)
             {
+                RefreshOnlineHostRuleButtonLabel();
                 onlineHostSettingsModal.SetActive(true);
             }
+        }
+
+        private void ToggleOnlineRoomRuleFromSettings()
+        {
+            if (!onlineIsHost || onlineClient == null || !onlineClient.IsConnected || string.IsNullOrEmpty(onlineRoomKey))
+            {
+                return;
+            }
+
+            if (session != null)
+            {
+                RefreshOnlineLobby("棋局已开始，不能切换规则。请先解散房间后重建。");
+                return;
+            }
+
+            onlineCurrentRoomRule = onlineCurrentRoomRule == RuleVariant.SpaceJump
+                ? RuleVariant.OnePieceJump
+                : RuleVariant.SpaceJump;
+            onlineClient.Send(new OnlineMessage
+            {
+                type = "SET_RULE",
+                ruleVariant = onlineCurrentRoomRule.ToString()
+            });
+            RefreshOnlineHostRuleButtonLabel();
+            RefreshOnlineLobby("已切换房间规则为" + BoardLayout.GetRuleLabel(onlineCurrentRoomRule) + "。该设置对本房间立即生效。");
+        }
+
+        private void RefreshOnlineHostRuleButtonLabel()
+        {
+            if (onlineHostRuleButton == null)
+            {
+                return;
+            }
+
+            SetButtonLabel(onlineHostRuleButton, "规则：" + BoardLayout.GetRuleLabel(onlineCurrentRoomRule));
+            onlineHostRuleButton.interactable = session == null;
         }
 
         private void HideOnlineHostSettings()
@@ -1324,6 +1550,56 @@ namespace SweetJumpJump
             }
         }
 
+        private void ToggleOnlineDualDeviceMode()
+        {
+            saveData.Options.OnlineDualDevice = !saveData.Options.OnlineDualDevice;
+            SaveManager.Save(saveData);
+            RefreshOnlineSlotButtons();
+            RefreshOnlineLobby(saveData.Options.OnlineDualDevice
+                ? "已切换为双人共用设备：选择位置时会同时选择对家。"
+                : "已切换为单人设备：选择位置时只占一个角。");
+        }
+
+        private void SelectOnlineSlot(SlotId slotId)
+        {
+            if (onlineClient == null || !onlineClient.IsConnected || string.IsNullOrEmpty(onlineRoomKey))
+            {
+                RefreshOnlineLobby("请先创建或加入房间。");
+                return;
+            }
+
+            if (session != null)
+            {
+                RefreshOnlineLobby("棋局已开始，不能切换位置。");
+                return;
+            }
+
+            List<SlotId> requestedSlots = new List<SlotId> { slotId };
+            if (saveData.Options.OnlineDualDevice)
+            {
+                requestedSlots.Add(BoardLayout.GetOppositeSlot(slotId));
+            }
+
+            for (int i = 0; i < requestedSlots.Count; i++)
+            {
+                SlotId requested = requestedSlots[i];
+                if (IsOnlineSeatTakenByOther(requested))
+                {
+                    RefreshOnlineLobby(BoardLayout.GetSlotLabel(requested) + " 已被其他玩家占用。");
+                    return;
+                }
+            }
+
+            onlineClient.Send(new OnlineMessage
+            {
+                type = "SELECT_SLOTS",
+                slots = requestedSlots.Select(value => value.ToString()).ToArray()
+            });
+            RefreshOnlineLobby(saveData.Options.OnlineDualDevice
+                ? "正在切换到 " + BoardLayout.GetSlotLabel(slotId) + " / " + BoardLayout.GetSlotLabel(requestedSlots[1]) + "..."
+                : "正在切换到 " + BoardLayout.GetSlotLabel(slotId) + "...");
+        }
+
         private void StartOnlineGame()
         {
             if (onlineClient == null || !onlineClient.IsConnected || string.IsNullOrEmpty(onlineRoomKey))
@@ -1357,9 +1633,35 @@ namespace SweetJumpJump
 
             try
             {
-                onlineClient = new OnlineClient();
-                onlineClient.Connect("wss://jump.mddxz.top/ws");
-                onlineReconnectDelaySeconds = 0f;
+                string[] serverUrls =
+                {
+                    "wss://jump.mddxz.top/ws"
+                };
+
+                Exception lastException = null;
+                for (int i = 0; i < serverUrls.Length; i++)
+                {
+                    try
+                    {
+                        onlineClient = new OnlineClient();
+                        onlineAuthenticated = false;
+                        onlineClient.Connect(serverUrls[i]);
+                        onlineReconnectDelaySeconds = 0f;
+                        RefreshOnlineLobby("已连接服务器：" + serverUrls[i].Replace("/ws", string.Empty));
+                        return;
+                    }
+                    catch (Exception exception)
+                    {
+                        lastException = exception;
+                        if (onlineClient != null)
+                        {
+                            onlineClient.Dispose();
+                            onlineClient = null;
+                        }
+                    }
+                }
+
+                throw lastException ?? new InvalidOperationException("无法连接服务器。");
             }
             catch (Exception exception)
             {
@@ -1369,7 +1671,7 @@ namespace SweetJumpJump
 
         private void UpdateOnlineReconnect()
         {
-            if (!onlineMode || string.IsNullOrEmpty(onlineRoomKey) || onlineClient != null)
+            if (string.IsNullOrEmpty(onlineRoomKey) || onlineClient != null)
             {
                 return;
             }
@@ -1382,6 +1684,97 @@ namespace SweetJumpJump
 
             onlineReconnectDelaySeconds = 3f;
             ConnectOnlineIfNeeded();
+        }
+
+        private void SendOnlineAuth(bool force)
+        {
+            if (onlineClient == null || !onlineClient.IsConnected)
+            {
+                RefreshOnlineLobby("服务器未连接。");
+                return;
+            }
+
+            string acct = saveData.Options.OnlinePlayerAccount == null ? string.Empty : saveData.Options.OnlinePlayerAccount.Trim();
+            string pwd = saveData.Options.OnlinePlayerPassword ?? string.Empty;
+            onlineClient.Send(new OnlineMessage
+            {
+                type = "AUTH",
+                account = acct,
+                password = pwd,
+                name = GetOnlinePlayerName(),
+                dualDevice = saveData.Options.OnlineDualDevice,
+                force = force
+            });
+        }
+
+        private void ShowOnlineLoginConflict(string message)
+        {
+            if (onlineLoginConflictText != null)
+            {
+                onlineLoginConflictText.text = string.IsNullOrWhiteSpace(message)
+                    ? "这个账号已经在其他地方登录。是否踢掉原来的登录？"
+                    : message;
+            }
+
+            if (onlineLoginConflictModal != null)
+            {
+                onlineLoginConflictModal.SetActive(true);
+            }
+            else
+            {
+                RefreshOnlineLobby("错误：" + message);
+            }
+        }
+
+        private void HideOnlineLoginConflict()
+        {
+            if (onlineLoginConflictModal != null)
+            {
+                onlineLoginConflictModal.SetActive(false);
+            }
+        }
+
+        private void ConfirmOnlineLoginTakeover()
+        {
+            HideOnlineLoginConflict();
+            SendOnlineAuth(true);
+        }
+
+        private void CancelOnlineLoginConflict()
+        {
+            onlinePendingAction = string.Empty;
+            onlinePendingActionRoomKey = string.Empty;
+            HideOnlineLoginConflict();
+            RefreshOnlineLobby("已取消登录。");
+        }
+
+        private void HandleOnlineSessionReplaced(string message)
+        {
+            onlineIgnoreNextDisconnectedNotice = true;
+            ClearOnlineAutoFinishReminder();
+            ClearOnlineRoomState();
+            HideOnlineLoginConflict();
+            session = null;
+            selectedRoom = null;
+            if (victoryModal != null)
+            {
+                victoryModal.SetActive(false);
+            }
+            if (exitConfirmModal != null)
+            {
+                exitConfirmModal.SetActive(false);
+            }
+            if (onlineClient != null)
+            {
+                onlineClient.Dispose();
+                onlineClient = null;
+            }
+            onlineAuthenticated = false;
+            onlinePendingAction = string.Empty;
+            onlinePendingActionRoomKey = string.Empty;
+
+            ShowPanel(onlinePanel);
+            RefreshOnlineLobby(string.IsNullOrWhiteSpace(message) ? "你的账号已在另一个地方登录，本端已下线。" : message);
         }
 
         private void PumpOnlineMessages()
@@ -1410,6 +1803,7 @@ namespace SweetJumpJump
                 onlineClientId = message.clientId;
                 string acct = saveData.Options.OnlinePlayerAccount == null ? string.Empty : saveData.Options.OnlinePlayerAccount.Trim();
                 string pwd = saveData.Options.OnlinePlayerPassword ?? string.Empty;
+                string token = saveData.Options.OnlineSessionToken ?? string.Empty;
                 if (string.IsNullOrEmpty(acct) || string.IsNullOrEmpty(pwd))
                 {
                     RefreshOnlineLobby("请先填写账号和密码，再连接服务器。");
@@ -1421,35 +1815,71 @@ namespace SweetJumpJump
                     return;
                 }
 
-                // Send AUTH with account + password
-                onlineClient.Send(new OnlineMessage
+                if (!string.IsNullOrEmpty(token))
                 {
-                    type = "AUTH",
-                    account = acct,
-                    password = pwd,
-                    name = GetOnlinePlayerName(),
-                    dualDevice = saveData.Options.OnlineDualDevice
-                });
+                    onlineClient.Send(new OnlineMessage
+                    {
+                        type = "AUTH_TOKEN",
+                        account = acct,
+                        sessionToken = token,
+                        name = GetOnlinePlayerName(),
+                        dualDevice = saveData.Options.OnlineDualDevice,
+                        force = false
+                    });
+                }
+                else
+                {
+                    SendOnlineAuth(false);
+                }
                 return;
             }
 
             if (message.type == "AUTH_OK")
             {
+                onlineAuthenticated = true;
                 onlineClientId = string.IsNullOrEmpty(message.clientId) ? onlineClientId : message.clientId;
+                if (!string.IsNullOrEmpty(message.sessionToken))
+                {
+                    saveData.Options.OnlineSessionToken = message.sessionToken;
+                }
                 if (!string.IsNullOrEmpty(message.name))
                 {
                     saveData.Options.OnlinePlayerName = message.name;
-                    SaveManager.Save(saveData);
                 }
+                SaveManager.Save(saveData);
                 onlineIsDualDevice = message.dualDevice;
                 RefreshOnlineLobby("已登录，可以创建或加入房间。");
                 // Request room list
                 onlineClient.Send(new OnlineMessage { type = "LIST" });
+                RunPendingOnlineAction();
                 return;
             }
 
             if (message.type == "ERROR")
             {
+                if (message.code == "AUTH_DUPLICATE")
+                {
+                    ShowOnlineLoginConflict(string.IsNullOrWhiteSpace(message.message)
+                        ? "这个账号已经在其他地方登录。是否踢掉原来的登录？"
+                        : message.message);
+                    return;
+                }
+
+                if (message.code == "SESSION_REPLACED")
+                {
+                    HandleOnlineSessionReplaced(message.message);
+                    return;
+                }
+
+                if (message.code == "AUTH_EXPIRED" || message.code == "AUTH_DISABLED")
+                {
+                    onlineAuthenticated = false;
+                    onlinePendingAction = string.Empty;
+                    onlinePendingActionRoomKey = string.Empty;
+                    saveData.Options.OnlineSessionToken = string.Empty;
+                    SaveManager.Save(saveData);
+                }
+
                 if (statusText != null && gamePanel != null && gamePanel.gameObject.activeSelf)
                 {
                     statusText.text = message.message;
@@ -1463,11 +1893,19 @@ namespace SweetJumpJump
 
             if (message.type == "DISCONNECTED")
             {
+                if (onlineIgnoreNextDisconnectedNotice)
+                {
+                    onlineIgnoreNextDisconnectedNotice = false;
+                    return;
+                }
+
+                ClearOnlineAutoFinishReminder();
                 if (onlineClient != null)
                 {
                     onlineClient.Dispose();
                     onlineClient = null;
                 }
+                onlineAuthenticated = false;
 
                 if (statusText != null && gamePanel != null && gamePanel.gameObject.activeSelf)
                 {
@@ -1477,6 +1915,12 @@ namespace SweetJumpJump
                 {
                     RefreshOnlineLobby(message.message);
                 }
+                return;
+            }
+
+            if (message.type == "SESSION_REPLACED")
+            {
+                HandleOnlineSessionReplaced(message.message);
                 return;
             }
 
@@ -1490,6 +1934,11 @@ namespace SweetJumpJump
             if (message.type == "ROOM")
             {
                 onlineRoomKey = message.roomKey;
+                if (TryParseRuleVariant(message.ruleVariant, out RuleVariant roomRuleVariant))
+                {
+                    onlineCurrentRoomRule = roomRuleVariant;
+                }
+                RefreshOnlineHostRuleButtonLabel();
                 onlineClientId = string.IsNullOrEmpty(onlineClientId) ? message.clientId : onlineClientId;
                 onlineIsHost = message.isHost;
                 TryParseSlot(message.slot, out onlineSlot);
@@ -1509,12 +1958,21 @@ namespace SweetJumpJump
                 {
                     UpdateSeatsLobby(message.seats);
                 }
+                else
+                {
+                    onlineSeatsBySlot.Clear();
+                }
                 RefreshOnlineLobby("房间已就绪，等待玩家加入。");
                 return;
             }
 
             if (message.type == "LOBBY")
             {
+                if (message.room != null && TryParseRuleVariant(message.room.ruleVariant, out RuleVariant lobbyRuleVariant))
+                {
+                    onlineCurrentRoomRule = lobbyRuleVariant;
+                }
+                RefreshOnlineHostRuleButtonLabel();
                 onlineIsHost = message.isHost;
                 onlineIsDualDevice = message.dualDevice;
                 if (message.controlledSlots != null)
@@ -1575,7 +2033,7 @@ namespace SweetJumpJump
             {
                 if (message.snapshot != null)
                 {
-                    ApplyStateSnapshot(message.snapshot, message.seats, message.roomKey);
+                    ApplyStateSnapshot(message.snapshot, message.seats, message.roomKey, message.version);
                 }
                 return;
             }
@@ -1606,8 +2064,20 @@ namespace SweetJumpJump
             }
         }
 
-        private void ApplyStateSnapshot(OnlineGameSnapshot snapshot, OnlineSeatSummary[] seats, string roomKey)
+        private void ApplyStateSnapshot(OnlineGameSnapshot snapshot, OnlineSeatSummary[] seats, string roomKey, int version)
         {
+            string signature = BuildOnlineStateSignature(snapshot, seats, roomKey, version);
+            if (!string.IsNullOrEmpty(onlineLastStateSignature) && onlineLastStateSignature == signature)
+            {
+                return;
+            }
+
+            onlineLastStateSignature = signature;
+            if (version > 0)
+            {
+                onlineLastActionSeq = version;
+            }
+
             bool sessionNew = session == null;
 
             if (sessionNew)
@@ -1617,7 +2087,7 @@ namespace SweetJumpJump
                 {
                     RoomId = "online-" + (roomKey ?? onlineRoomKey),
                     RoomName = "在线房间 " + (roomKey ?? onlineRoomKey),
-                    RuleVariant = saveData.Options.DefaultRule,
+                    RuleVariant = onlineCurrentRoomRule,
                     SoundEnabled = saveData.Options.SoundEnabled,
                     MusicEnabled = saveData.Options.MusicEnabled,
                     PromptEnabled = false,
@@ -1696,17 +2166,147 @@ namespace SweetJumpJump
                 }
             }
 
-            StartCoroutine(RunAiTurnIfNeeded());
+            // Online mode uses authoritative server snapshots. Avoid spawning extra AI coroutines per STATE.
+        }
+
+        private string BuildOnlineStateSignature(OnlineGameSnapshot snapshot, OnlineSeatSummary[] seats, string roomKey, int version)
+        {
+            if (snapshot == null)
+            {
+                return "";
+            }
+
+            System.Text.StringBuilder builder = new System.Text.StringBuilder(1024);
+            builder.Append(roomKey).Append('|').Append(version).Append('|')
+                .Append(snapshot.currentPlayerSlot).Append('|')
+                .Append(snapshot.currentPlayerKind).Append('|')
+                .Append(snapshot.selectedPieceId).Append('|')
+                .Append(snapshot.hasMovedThisTurn ? '1' : '0').Append('|')
+                .Append(snapshot.isGameOver ? '1' : '0').Append('|')
+                .Append(snapshot.statusMessage);
+
+            if (snapshot.pieces != null)
+            {
+                for (int i = 0; i < snapshot.pieces.Length; i++)
+                {
+                    OnlinePieceState piece = snapshot.pieces[i];
+                    if (piece == null || piece.position == null)
+                    {
+                        continue;
+                    }
+
+                    builder.Append('|').Append(piece.pieceId).Append(':').Append(piece.owner)
+                        .Append('@').Append(piece.position.q).Append(',').Append(piece.position.r);
+                }
+            }
+
+            if (seats != null)
+            {
+                for (int i = 0; i < seats.Length; i++)
+                {
+                    OnlineSeatSummary seat = seats[i];
+                    if (seat == null)
+                    {
+                        continue;
+                    }
+
+                    builder.Append('|').Append(seat.slot).Append(':').Append(seat.name).Append(':')
+                        .Append(seat.isHost ? '1' : '0').Append(':').Append(seat.clientId);
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        private void UpdateOnlineAutoFinishReminder()
+        {
+            if (!onlineMode || session == null || !IsOnlineMyTurn() || session.IsGameOver || !session.HasMovedThisTurn)
+            {
+                ClearOnlineAutoFinishReminder();
+                return;
+            }
+
+            float now = Time.unscaledTime;
+            if (onlineAutoFinishMovedAt < 0f)
+            {
+                onlineAutoFinishMovedAt = now;
+                onlineAutoFinishReminderAt = now + 7f;
+                onlineAutoFinishSubmitAt = now + 10f;
+                return;
+            }
+
+            if (!onlineAutoFinishModalVisible && now >= onlineAutoFinishReminderAt)
+            {
+                onlineAutoFinishModalVisible = true;
+                if (statusText != null)
+                {
+                    statusText.text = "还有 3 秒将自动完成移动；你也可以现在点“完成移动”。";
+                }
+                PlaySfx("prompt");
+            }
+
+            if (now >= onlineAutoFinishSubmitAt)
+            {
+                ClearOnlineAutoFinishReminder();
+                if (onlineClient != null && onlineClient.IsConnected && session.CanFinishTurn)
+                {
+                    onlineClient.Send(new OnlineMessage { type = "FINISH" });
+                    if (statusText != null)
+                    {
+                        statusText.text = "已自动完成移动。";
+                    }
+                }
+            }
+        }
+
+        private void ClearOnlineAutoFinishReminder()
+        {
+            onlineAutoFinishMovedAt = -1f;
+            onlineAutoFinishReminderAt = -1f;
+            onlineAutoFinishSubmitAt = -1f;
+            HideOnlineAutoFinishReminder();
+        }
+
+        private void ShowOnlineAutoFinishReminder()
+        {
+            if (onlineAutoFinishModal != null)
+            {
+                onlineAutoFinishModal.SetActive(true);
+            }
+
+            onlineAutoFinishModalVisible = true;
+            if (onlineAutoFinishModalText != null)
+            {
+                onlineAutoFinishModalText.text = "你已经完成移动，请点击“完成移动”。";
+            }
+        }
+
+        private void HideOnlineAutoFinishReminder()
+        {
+            if (onlineAutoFinishModal != null)
+            {
+                onlineAutoFinishModal.SetActive(false);
+            }
+
+            onlineAutoFinishModalVisible = false;
         }
 
         private void UpdateSeatsLobby(OnlineSeatSummary[] seats)
         {
             // Build onlineLobbySummary from seats (used by RefreshOnlineLobby for name display)
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            onlineSeatsBySlot.Clear();
             for (int i = 0; i < seats.Length; i++)
             {
                 OnlineSeatSummary seat = seats[i];
-                string label = BoardLayout.GetSlotLabel(!string.IsNullOrEmpty(seat.slot) && Enum.TryParse(seat.slot, true, out SlotId _sid) ? _sid : SlotId.Top);
+                SlotId parsedSeatSlot;
+                bool hasSlot = TryParseSlot(seat.slot, out parsedSeatSlot);
+                if (hasSlot)
+                {
+                    onlineSeatsBySlot[parsedSeatSlot] = seat;
+                }
+
+                string label = BoardLayout.GetSlotLabel(hasSlot ? parsedSeatSlot : SlotId.Top);
                 string dualTag = seat.isDualDevice ? "（双人端）" : string.Empty;
                 sb.AppendFormat("{0}：{1}{2}{3}\n", label, seat.name ?? "?", seat.isHost ? "（房主）" : string.Empty, dualTag);
                 SlotId seatSlot;
@@ -1720,6 +2320,7 @@ namespace SweetJumpJump
             }
 
             onlineLobbySummary = sb.ToString();
+            RefreshOnlineSlotButtons();
         }
 
         private void ApplyOnlineSelect(OnlineMessage message)
@@ -1757,6 +2358,21 @@ namespace SweetJumpJump
 
         private void RefreshOnlineLobby(string message)
         {
+            if (onlineLoginSection != null)
+            {
+                onlineLoginSection.gameObject.SetActive(!onlineAuthenticated);
+            }
+
+            if (onlineLobbySection != null)
+            {
+                onlineLobbySection.gameObject.SetActive(onlineAuthenticated);
+            }
+
+            if (onlineLoginButton != null)
+            {
+                onlineLoginButton.interactable = onlineClient == null || !onlineClient.IsConnected || !onlineAuthenticated;
+            }
+
             if (onlineRoomKeyText != null)
             {
                 onlineRoomKeyText.text = string.IsNullOrEmpty(onlineRoomKey)
@@ -1767,7 +2383,17 @@ namespace SweetJumpJump
             if (onlineStatusText != null)
             {
                 string hostLine = onlineIsHost ? "你是房主，可以开始游戏。" : "等待房主开始。";
-                onlineStatusText.text = string.Format("{0}\n{1}\n{2}", message, onlineLobbySummary, string.IsNullOrEmpty(onlineRoomKey) ? string.Empty : hostLine);
+                string ruleLine = string.IsNullOrEmpty(onlineRoomKey)
+                    ? ""
+                    : "规则：" + BoardLayout.GetRuleLabel(onlineCurrentRoomRule);
+                if (!onlineAuthenticated)
+                {
+                    onlineStatusText.text = string.IsNullOrWhiteSpace(message) ? "请先登录，然后进入在线大厅。" : message;
+                }
+                else
+                {
+                    onlineStatusText.text = string.Format("{0}\n{1}\n{2}{3}", message, onlineLobbySummary, string.IsNullOrEmpty(onlineRoomKey) ? string.Empty : hostLine, string.IsNullOrEmpty(ruleLine) ? string.Empty : "\n" + ruleLine);
+                }
             }
 
             if (onlineDiscoveryText != null)
@@ -1781,11 +2407,14 @@ namespace SweetJumpJump
             {
                 onlineStartButton.interactable = onlineIsHost && !string.IsNullOrEmpty(onlineRoomKey);
             }
+
+            RefreshOnlineSlotButtons();
         }
 
         private void UpdateOnlineDiscoveredRooms(OnlineRoomSummary[] rooms)
         {
             onlineDiscoveredRoomKeys.Clear();
+            onlineDiscoveredRooms.Clear();
             if (rooms == null)
             {
                 return;
@@ -1793,10 +2422,17 @@ namespace SweetJumpJump
 
             for (int i = 0; i < rooms.Length; i++)
             {
-                string key = rooms[i].roomKey;
+                OnlineRoomSummary room = rooms[i];
+                if (room == null || room.started)
+                {
+                    continue;
+                }
+
+                string key = room.roomKey;
                 if (!string.IsNullOrEmpty(key) && !onlineDiscoveredRoomKeys.Contains(key))
                 {
                     onlineDiscoveredRoomKeys.Add(key);
+                    onlineDiscoveredRooms[key] = room;
                 }
             }
         }
@@ -1831,9 +2467,173 @@ namespace SweetJumpJump
             for (int i = 0; i < onlineDiscoveredRoomKeys.Count; i++)
             {
                 string roomKey = onlineDiscoveredRoomKeys[i];
-                Button button = CreateLayoutButton(onlineDiscoveryListContainer, "房间 " + roomKey + " · 申请加入", () => RequestJoinDiscoveredRoom(roomKey), ButtonLabelLength.SixCharacters);
+                string summary = "房间 " + roomKey + " · 申请加入";
+                if (onlineDiscoveredRooms.TryGetValue(roomKey, out OnlineRoomSummary room) && room != null)
+                {
+                    int playerCount = room.players == null ? 0 : room.players.Length;
+                    RuleVariant parsedRule = RuleVariant.SpaceJump;
+                    if (TryParseRuleVariant(room.ruleVariant, out RuleVariant roomRule))
+                    {
+                        parsedRule = roomRule;
+                    }
+
+                    summary = string.Format("房间 {0} · {1} · {2}人", roomKey, BoardLayout.GetRuleLabel(parsedRule), playerCount);
+                }
+
+                Button button = CreateLayoutButton(onlineDiscoveryListContainer, summary, () => RequestJoinDiscoveredRoom(roomKey), ButtonLabelLength.SixCharacters);
                 onlineDiscoveredRoomButtons.Add(button);
             }
+        }
+
+        private void RefreshOnlineSlotButtons()
+        {
+            if (onlineDualDeviceButton != null)
+            {
+                SetButtonLabel(onlineDualDeviceButton, saveData.Options.OnlineDualDevice ? "本设备：双人共用" : "本设备：单人");
+                onlineDualDeviceButton.interactable = session == null;
+            }
+
+            if (onlineSlotPickerText != null)
+            {
+                onlineSlotPickerText.text = string.IsNullOrEmpty(onlineRoomKey)
+                    ? "选择位置"
+                    : (saveData.Options.OnlineDualDevice ? "选择位置（自动选择对家）" : "选择位置");
+            }
+
+            foreach (KeyValuePair<SlotId, Button> entry in onlineSlotButtons)
+            {
+                SlotId slotId = entry.Key;
+                Button button = entry.Value;
+                if (button == null)
+                {
+                    continue;
+                }
+
+                bool mine = onlineSlots.Contains(slotId);
+                bool occupiedByOther = IsOnlineSeatTakenByOther(slotId);
+                SlotId opposite = BoardLayout.GetOppositeSlot(slotId);
+                bool oppositeBlocked = saveData.Options.OnlineDualDevice && IsOnlineSeatTakenByOther(opposite);
+                bool canPick = !string.IsNullOrEmpty(onlineRoomKey) && session == null && !occupiedByOther && !oppositeBlocked;
+
+                button.interactable = canPick;
+                RefreshOnlineSlotDiagramNode(slotId, button, mine, occupiedByOther, oppositeBlocked, canPick);
+            }
+        }
+
+        private void RefreshOnlineSlotDiagramNode(SlotId slotId, Button button, bool mine, bool occupiedByOther, bool oppositeBlocked, bool canPick)
+        {
+            Color pieceColor = SoftenPieceColor(BoardLayout.GetPieceColor(slotId));
+            Color displayColor = pieceColor;
+            float alpha = 0.82f;
+            if (string.IsNullOrEmpty(onlineRoomKey))
+            {
+                displayColor = Color.Lerp(pieceColor, Color.white, 0.58f);
+                alpha = 0.42f;
+            }
+            else if (mine)
+            {
+                displayColor = pieceColor;
+                alpha = 1f;
+            }
+            else if (occupiedByOther)
+            {
+                displayColor = Color.Lerp(pieceColor, Color.black, 0.16f);
+                alpha = 0.9f;
+            }
+            else if (oppositeBlocked || session != null)
+            {
+                displayColor = Color.Lerp(pieceColor, new Color(0.78f, 0.78f, 0.78f), 0.5f);
+                alpha = 0.48f;
+            }
+            else if (canPick)
+            {
+                displayColor = Color.Lerp(pieceColor, Color.white, 0.08f);
+                alpha = 0.95f;
+            }
+
+            displayColor.a = alpha;
+            if (onlineSlotNodeImages.TryGetValue(slotId, out Image image) && image != null)
+            {
+                image.color = displayColor;
+            }
+
+            if (onlineSlotNodeRings.TryGetValue(slotId, out Image ring) && ring != null)
+            {
+                ring.color = mine
+                    ? new Color(1f, 1f, 1f, 0.94f)
+                    : (canPick ? new Color(1f, 1f, 1f, 0.62f) : new Color(0.45f, 0.45f, 0.45f, 0.36f));
+            }
+
+            OnlineSeatSummary seat = null;
+            onlineSeatsBySlot.TryGetValue(slotId, out seat);
+            string nameText = "空位";
+            if (mine)
+            {
+                nameText = "我";
+            }
+            else if (seat != null && !string.IsNullOrEmpty(seat.name))
+            {
+                nameText = TrimOnlineSeatName(seat.name);
+            }
+            else if (oppositeBlocked)
+            {
+                nameText = "对家占用";
+            }
+            else if (session != null)
+            {
+                nameText = "本局中";
+            }
+
+            Color textColor = mine ? new Color(1f, 1f, 1f, 0.96f) : new Color(0.32f, 0.24f, 0.3f, 0.88f);
+            if (onlineSlotNodeLabels.TryGetValue(slotId, out TMP_Text label) && label != null)
+            {
+                label.text = BoardLayout.GetSlotLabel(slotId);
+                label.color = textColor;
+                RequestTextCharacters(label, label.text, label.fontSize);
+            }
+
+            if (onlineSlotNodeNames.TryGetValue(slotId, out TMP_Text nameLabel) && nameLabel != null)
+            {
+                nameLabel.text = nameText;
+                nameLabel.color = mine ? new Color(1f, 1f, 1f, 0.86f) : new Color(0.24f, 0.22f, 0.26f, 0.72f);
+                RequestTextCharacters(nameLabel, nameLabel.text, nameLabel.fontSize);
+            }
+
+            if (onlineSlotNodeBadges.TryGetValue(slotId, out TMP_Text badge) && badge != null)
+            {
+                bool showBadge = seat != null && seat.isHost;
+                badge.gameObject.SetActive(showBadge);
+                if (showBadge)
+                {
+                    badge.text = "★";
+                    RequestTextCharacters(badge, badge.text, badge.fontSize);
+                }
+            }
+
+            if (button != null)
+            {
+                button.targetGraphic = image;
+            }
+        }
+
+        private static string TrimOnlineSeatName(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            return value.Length > 5 ? value.Substring(0, 5) + "…" : value;
+        }
+
+        private bool IsOnlineSeatTakenByOther(SlotId slotId)
+        {
+            if (!onlineSeatsBySlot.TryGetValue(slotId, out OnlineSeatSummary seat) || seat == null)
+            {
+                return false;
+            }
+
+            return !onlineSlots.Contains(slotId);
         }
 
         private void UpdateOnlineAiSlots(string aiSlots)
@@ -1868,36 +2668,55 @@ namespace SweetJumpJump
 
         private void DisconnectOnline()
         {
+            ClearOnlineAutoFinishReminder();
             if (onlineClient != null)
             {
                 onlineClient.Dispose();
                 onlineClient = null;
             }
 
+            onlineAuthenticated = false;
+            onlinePendingAction = string.Empty;
+            onlinePendingActionRoomKey = string.Empty;
             ClearOnlineRoomState();
             onlineClientId = string.Empty;
         }
 
         private void ClearOnlineRoomState()
         {
+            ClearOnlineAutoFinishReminder();
             onlineMode = false;
             onlineIsHost = false;
             onlineIsDualDevice = false;
             onlineSlots.Clear();
             onlineRoomKey = string.Empty;
+            onlineCurrentRoomRule = saveData != null && saveData.Options != null ? saveData.Options.DefaultRule : RuleVariant.SpaceJump;
             onlineLobbySummary = string.Empty;
             onlineDiscoveredRoomKey = string.Empty;
             onlinePendingRestartClientId = string.Empty;
             onlinePendingRestartPlayerName = string.Empty;
+            onlinePendingAction = string.Empty;
+            onlinePendingActionRoomKey = string.Empty;
             onlineReconnectDelaySeconds = 0f;
+            onlineLastActionSeq = 0;
+            onlineLastStateSignature = string.Empty;
+            selectedPulseView = null;
             onlineDiscoveredRoomKeys.Clear();
+            onlineSeatsBySlot.Clear();
             HideOnlineRestartVote();
+            HideOnlineLoginConflict();
             HideOnlineHostSettings();
+            RefreshOnlineSlotButtons();
         }
 
         private static bool TryParseSlot(string value, out SlotId slotId)
         {
             return Enum.TryParse(value, true, out slotId);
+        }
+
+        private static bool TryParseRuleVariant(string value, out RuleVariant ruleVariant)
+        {
+            return Enum.TryParse(value, true, out ruleVariant);
         }
 
         private void EnsureDefaultRoom()
@@ -1933,6 +2752,12 @@ namespace SweetJumpJump
             {
                 EnsureOnlineIdentity();
                 saveData.SaveVersion = 4;
+            }
+
+            if (saveData.SaveVersion < 5)
+            {
+                saveData.Options.DefaultRule = RuleVariant.SpaceJump;
+                saveData.SaveVersion = 5;
             }
 
             EnsureOnlineIdentity();
@@ -2027,14 +2852,22 @@ namespace SweetJumpJump
 
             string account = onlineAccountInput.text == null ? string.Empty : onlineAccountInput.text.Trim();
             string password = onlinePasswordInput.text ?? string.Empty;
+            bool authChanged = false;
             if (!string.IsNullOrEmpty(account))
             {
+                authChanged = !string.Equals(saveData.Options.OnlinePlayerAccount ?? string.Empty, account, StringComparison.Ordinal);
                 saveData.Options.OnlinePlayerAccount = account;
             }
 
             if (!string.IsNullOrEmpty(password))
             {
+                authChanged = authChanged || !string.Equals(saveData.Options.OnlinePlayerPassword ?? string.Empty, password, StringComparison.Ordinal);
                 saveData.Options.OnlinePlayerPassword = password;
+            }
+
+            if (authChanged)
+            {
+                saveData.Options.OnlineSessionToken = string.Empty;
             }
 
             SaveManager.Save(saveData);
@@ -2867,28 +3700,20 @@ namespace SweetJumpJump
 
         private void UpdateSelectionPulse()
         {
-            if (session == null || session.SelectedPieceId < 0)
+            if (session == null || session.SelectedPieceId < 0 || selectedPulseView == null || selectedPulseView.PieceImage == null || !selectedPulseView.PieceImage.gameObject.activeSelf)
             {
                 return;
             }
 
             float scale = 1.08f + Mathf.Sin(Time.time * 7f) * 0.045f;
-            foreach (BoardCellView view in cellViews.Values)
+            selectedPulseView.PieceImage.transform.localScale = Vector3.one * scale;
+            if (selectedPulseView.PieceSelectionHighlight != null)
             {
-                PieceState piece = session.GetPieceAt(view.Coord);
-                if (piece != null && piece.PieceId == session.SelectedPieceId)
-                {
-                    view.PieceImage.transform.localScale = Vector3.one * scale;
-                    if (view.PieceSelectionHighlight != null)
-                    {
-                        view.PieceSelectionHighlight.transform.localScale = Vector3.one * scale;
-                    }
-                    if (view.SelectionRing != null)
-                    {
-                        view.SelectionRing.color = BoardSelectionColor;
-                    }
-                    return;
-                }
+                selectedPulseView.PieceSelectionHighlight.transform.localScale = Vector3.one * scale;
+            }
+            if (selectedPulseView.SelectionRing != null)
+            {
+                selectedPulseView.SelectionRing.color = BoardSelectionColor;
             }
         }
 
@@ -3042,14 +3867,6 @@ namespace SweetJumpJump
             SlotId[] slots = BoardLayout.GetSlotsInDisplayOrder();
             for (int i = 0; i < slots.Length; i++)
             {
-                if (!boardNameButtons.ContainsKey(slots[i]))
-                {
-                    SlotId slotId = slots[i];
-                    Button button = CreateButton(boardContainer, "查看", () => RevealBoardName(slotId), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(92f, 40f), Vector2.zero, ButtonLabelLength.TwoCharacters);
-                    button.gameObject.name = "BoardNameButton_" + slotId;
-                    boardNameButtons[slotId] = button;
-                }
-
                 if (boardNameLabels.ContainsKey(slots[i]))
                 {
                     continue;
@@ -3155,14 +3972,6 @@ namespace SweetJumpJump
                 RectTransform rect = entry.Value.rectTransform;
                 rect.sizeDelta = new Vector2(236f, 50f);
                 rect.anchoredPosition = rotated + new Vector2(fromCenter.x * 158f, fromCenter.y * 108f);
-
-                Button button;
-                if (boardNameButtons.TryGetValue(entry.Key, out button))
-                {
-                    RectTransform buttonRect = button.GetComponent<RectTransform>();
-                    buttonRect.sizeDelta = new Vector2(92f, 40f);
-                    buttonRect.anchoredPosition = rotated + new Vector2(fromCenter.x * 118f, fromCenter.y * 82f);
-                }
             }
         }
 
@@ -3297,7 +4106,7 @@ namespace SweetJumpJump
             CreateText("OptionsTitle", optionsPanel, "游戏选项", 76, FontStyle.Bold, new Color(0.71f, 0.25f, 0.41f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.83f), new Vector2(0.5f, 0.83f), new Vector2(800f, 100f));
             optionsSummaryText = CreateText("OptionsSummary", optionsPanel, string.Empty, 32, FontStyle.Normal, new Color(0.54f, 0.35f, 0.44f), TextAnchor.UpperLeft, new Vector2(0.5f, 0.64f), new Vector2(0.5f, 0.64f), new Vector2(880f, 300f));
 
-            ruleToggleButton = CreateButton(optionsPanel, "默认规则：一子跳", ToggleDefaultRule, new Vector2(0.5f, 0.48f), new Vector2(0.5f, 0.48f), OptionButtonSize, Vector2.zero);
+            ruleToggleButton = CreateButton(optionsPanel, "默认规则：空跳", ToggleDefaultRule, new Vector2(0.5f, 0.48f), new Vector2(0.5f, 0.48f), OptionButtonSize, Vector2.zero);
             themeToggleButton = CreateButton(optionsPanel, "背景主题：粉色糖果", ToggleTheme, new Vector2(0.5f, 0.405f), new Vector2(0.5f, 0.405f), OptionButtonSize, Vector2.zero);
             soundToggleButton = CreateButton(optionsPanel, "音效：开", ToggleSound, new Vector2(0.5f, 0.33f), new Vector2(0.5f, 0.33f), OptionButtonSize, Vector2.zero);
             musicToggleButton = CreateButton(optionsPanel, "背景音乐：开", ToggleMusic, new Vector2(0.5f, 0.255f), new Vector2(0.5f, 0.255f), OptionButtonSize, Vector2.zero);
@@ -3368,7 +4177,7 @@ namespace SweetJumpJump
             CreateText("RoomNameLabel", roomEditPanel, "房间名称", 30, FontStyle.Bold, new Color(0.48f, 0.28f, 0.37f), TextAnchor.MiddleLeft, new Vector2(0.5f, 0.82f), new Vector2(0.5f, 0.82f), new Vector2(900f, 50f));
             roomNameInput = CreateInputField(roomEditPanel, new Vector2(0.5f, 0.775f), new Vector2(900f, 72f));
 
-            roomRuleToggleButton = CreateButton(roomEditPanel, "规则：一子跳", ToggleRoomRule, new Vector2(0.5f, 0.7f), new Vector2(0.5f, 0.7f), RoomEditLargeButtonSize, new Vector2(-235f, 0f));
+            roomRuleToggleButton = CreateButton(roomEditPanel, "规则：空跳", ToggleRoomRule, new Vector2(0.5f, 0.7f), new Vector2(0.5f, 0.7f), RoomEditLargeButtonSize, new Vector2(-235f, 0f));
             roomThemeToggleButton = CreateButton(roomEditPanel, "主题：粉色糖果", ToggleRoomTheme, new Vector2(0.5f, 0.7f), new Vector2(0.5f, 0.7f), RoomEditLargeButtonSize, new Vector2(235f, 0f));
             roomSoundToggleButton = CreateButton(roomEditPanel, "音效：开", ToggleRoomSound, new Vector2(0.5f, 0.635f), new Vector2(0.5f, 0.635f), RoomEditCompactButtonSize, new Vector2(-310f, 0f));
             roomMusicToggleButton = CreateButton(roomEditPanel, "音乐：开", ToggleRoomMusic, new Vector2(0.5f, 0.635f), new Vector2(0.5f, 0.635f), RoomEditCompactButtonSize, Vector2.zero);
@@ -3396,6 +4205,12 @@ namespace SweetJumpJump
         private void BuildOnlinePanel()
         {
             onlineAiSlotButtons.Clear();
+            onlineSlotButtons.Clear();
+            onlineSlotNodeImages.Clear();
+            onlineSlotNodeRings.Clear();
+            onlineSlotNodeLabels.Clear();
+            onlineSlotNodeNames.Clear();
+            onlineSlotNodeBadges.Clear();
 
             CreateText("OnlineTitle", onlinePanel, "在线房间", 66, FontStyle.Bold, new Color(0.7f, 0.25f, 0.4f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.91f), new Vector2(0.5f, 0.91f), new Vector2(900f, 88f));
 
@@ -3444,10 +4259,16 @@ namespace SweetJumpJump
             scrollRect.vertical = true;
             scrollRect.movementType = ScrollRect.MovementType.Clamped;
 
-            TMP_Text serverText = CreateText("OnlineServer", content.transform, "服务器：https://jump.mddxz.top", 28, FontStyle.Normal, new Color(0.55f, 0.36f, 0.43f), TextAnchor.MiddleCenter, size: new Vector2(900f, 46f));
+            TMP_Text serverText = CreateText("OnlineServer", content.transform, "服务器：jump.mddxz.top", 28, FontStyle.Normal, new Color(0.55f, 0.36f, 0.43f), TextAnchor.MiddleCenter, size: new Vector2(900f, 46f));
             SetLayoutElement(serverText, 46f);
 
-            onlineAccountInput = CreateInputField(content.transform, new Vector2(0.5f, 0.5f), new Vector2(900f, 62f));
+            onlineStatusText = CreateText("OnlineStatus", content.transform, string.Empty, 27, FontStyle.Normal, new Color(0.45f, 0.28f, 0.36f), TextAnchor.MiddleCenter, size: new Vector2(900f, 108f));
+            SetLayoutElement(onlineStatusText, 108f);
+
+            onlineLoginSection = CreateLayoutSection(content.transform, "OnlineLoginSection");
+            onlineLobbySection = CreateLayoutSection(content.transform, "OnlineLobbySection");
+
+            onlineAccountInput = CreateInputField(onlineLoginSection, new Vector2(0.5f, 0.5f), new Vector2(900f, 62f));
             onlineAccountInput.text = saveData.Options.OnlinePlayerAccount ?? string.Empty;
             onlineAccountInput.characterLimit = 32;
             TMP_Text accountPlaceholder = onlineAccountInput.placeholder as TMP_Text;
@@ -3458,7 +4279,7 @@ namespace SweetJumpJump
             onlineAccountInput.onEndEdit.AddListener(_ => ApplyOnlineAccountPassword());
             SetLayoutElement(onlineAccountInput, 62f);
 
-            onlinePasswordInput = CreateInputField(content.transform, new Vector2(0.5f, 0.5f), new Vector2(900f, 62f));
+            onlinePasswordInput = CreateInputField(onlineLoginSection, new Vector2(0.5f, 0.5f), new Vector2(900f, 62f));
             onlinePasswordInput.text = saveData.Options.OnlinePlayerPassword ?? string.Empty;
             onlinePasswordInput.contentType = TMP_InputField.ContentType.Password;
             onlinePasswordInput.characterLimit = 64;
@@ -3470,7 +4291,7 @@ namespace SweetJumpJump
             onlinePasswordInput.onEndEdit.AddListener(_ => ApplyOnlineAccountPassword());
             SetLayoutElement(onlinePasswordInput, 62f);
 
-            onlinePlayerNameInput = CreateInputField(content.transform, new Vector2(0.5f, 0.5f), new Vector2(900f, 62f));
+            onlinePlayerNameInput = CreateInputField(onlineLoginSection, new Vector2(0.5f, 0.5f), new Vector2(900f, 62f));
             onlinePlayerNameInput.text = GetOnlinePlayerName();
             onlinePlayerNameInput.characterLimit = 14;
             TMP_Text namePlaceholder = onlinePlayerNameInput.placeholder as TMP_Text;
@@ -3481,17 +4302,23 @@ namespace SweetJumpJump
             onlinePlayerNameInput.onEndEdit.AddListener(_ => ApplyOnlinePlayerName());
             SetLayoutElement(onlinePlayerNameInput, 62f);
 
-            onlineRoomKeyText = CreateText("OnlineRoomKey", content.transform, "房间密钥：未创建", 36, FontStyle.Bold, new Color(0.48f, 0.28f, 0.37f), TextAnchor.MiddleCenter, size: new Vector2(900f, 60f));
+            onlineLoginButton = CreateLayoutButton(onlineLoginSection, "登录进入大厅", LoginOnline, ButtonLabelLength.SixCharacters);
+
+            onlineDualDeviceButton = CreateLayoutButton(onlineLobbySection, saveData.Options.OnlineDualDevice ? "本设备：双人共用" : "本设备：单人", ToggleOnlineDualDeviceMode, ButtonLabelLength.SixCharacters);
+
+            onlineRoomKeyText = CreateText("OnlineRoomKey", onlineLobbySection, "房间密钥：未创建", 36, FontStyle.Bold, new Color(0.48f, 0.28f, 0.37f), TextAnchor.MiddleCenter, size: new Vector2(900f, 60f));
             SetLayoutElement(onlineRoomKeyText, 60f);
 
-            onlineStatusText = CreateText("OnlineStatus", content.transform, string.Empty, 27, FontStyle.Normal, new Color(0.45f, 0.28f, 0.36f), TextAnchor.MiddleCenter, size: new Vector2(900f, 130f));
-            SetLayoutElement(onlineStatusText, 130f);
+            onlineSlotPickerText = CreateText("OnlineSlotPicker", onlineLobbySection, "选择位置", 30, FontStyle.Bold, new Color(0.48f, 0.28f, 0.37f), TextAnchor.MiddleCenter, size: new Vector2(900f, 44f));
+            SetLayoutElement(onlineSlotPickerText, 44f);
 
-            onlineDiscoveryText = CreateText("OnlineDiscovery", content.transform, "发现房间", 30, FontStyle.Bold, new Color(0.48f, 0.28f, 0.37f), TextAnchor.MiddleCenter, size: new Vector2(900f, 44f));
+            CreateOnlineSlotDiagram(onlineLobbySection);
+
+            onlineDiscoveryText = CreateText("OnlineDiscovery", onlineLobbySection, "发现房间", 30, FontStyle.Bold, new Color(0.48f, 0.28f, 0.37f), TextAnchor.MiddleCenter, size: new Vector2(900f, 44f));
             SetLayoutElement(onlineDiscoveryText, 44f);
 
             GameObject discoveryListObject = new GameObject("OnlineDiscoveryList", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(ContentSizeFitter), typeof(LayoutElement));
-            discoveryListObject.transform.SetParent(content.transform, false);
+            discoveryListObject.transform.SetParent(onlineLobbySection, false);
             onlineDiscoveryListContainer = discoveryListObject.GetComponent<RectTransform>();
             VerticalLayoutGroup discoveryLayout = discoveryListObject.GetComponent<VerticalLayoutGroup>();
             discoveryLayout.spacing = 10f;
@@ -3504,7 +4331,7 @@ namespace SweetJumpJump
             discoveryElement.preferredHeight = 146f;
             discoveryElement.minHeight = 92f;
 
-            onlineRoomKeyInput = CreateInputField(content.transform, new Vector2(0.5f, 0.5f), new Vector2(900f, 66f));
+            onlineRoomKeyInput = CreateInputField(onlineLobbySection, new Vector2(0.5f, 0.5f), new Vector2(900f, 66f));
             SetLayoutElement(onlineRoomKeyInput, 66f);
             onlineRoomKeyInput.characterLimit = 8;
             TMP_Text placeholder = onlineRoomKeyInput.placeholder as TMP_Text;
@@ -3513,27 +4340,156 @@ namespace SweetJumpJump
                 placeholder.text = "输入房间密钥";
             }
 
-            Transform rowOne = CreateLayoutRow(content.transform, "OnlineRowOne", 74f);
+            Transform rowOne = CreateLayoutRow(onlineLobbySection, "OnlineRowOne", 74f);
             CreateLayoutButton(rowOne, "创建房间", CreateOnlineRoom, ButtonLabelLength.FourCharacters);
             CreateLayoutButton(rowOne, "加入房间", JoinOnlineRoom, ButtonLabelLength.FourCharacters);
 
-            Transform rowTwo = CreateLayoutRow(content.transform, "OnlineRowTwo", 74f);
+            Transform rowTwo = CreateLayoutRow(onlineLobbySection, "OnlineRowTwo", 74f);
             onlineStartButton = CreateLayoutButton(rowTwo, "开始本局", StartOnlineGame, ButtonLabelLength.FourCharacters);
             CreateLayoutButton(rowTwo, "刷新房间", () => { if (onlineClient != null && onlineClient.IsConnected) onlineClient.Send(new OnlineMessage { type = "LIST" }); }, ButtonLabelLength.FourCharacters);
 
-            Transform rowThree = CreateLayoutRow(content.transform, "OnlineRowThree", 74f);
+            Transform rowThree = CreateLayoutRow(onlineLobbySection, "OnlineRowThree", 74f);
             CreateLayoutButton(rowThree, "退出房间", () =>
             {
                 if (onlineClient != null && onlineClient.IsConnected && !string.IsNullOrEmpty(onlineRoomKey))
                     onlineClient.Send(new OnlineMessage { type = "LEAVE_ROOM" });
             }, ButtonLabelLength.FourCharacters);
+            CreateLayoutButton(rowThree, "退出登录", LogoutOnline, ButtonLabelLength.FourCharacters);
 
             CreateButton(onlinePanel, "返回主菜单", () => { DisconnectOnline(); ShowMenu(); }, new Vector2(0.5f, 0.055f), new Vector2(0.5f, 0.055f), FullWidthButtonSize, Vector2.zero);
 
             onlineRestartVoteModal = CreateOnlineRestartVoteModal(onlinePanel);
             onlineJoinRoomConfirmModal = CreateOnlineJoinRoomConfirmModal(onlinePanel);
             onlineJoinRequestModal = CreateOnlineJoinRequestModal(onlinePanel);
-            RefreshOnlineLobby("连接服务器后，可以创建房间或输入密钥加入。");
+            onlineLoginConflictModal = CreateOnlineLoginConflictModal(onlinePanel);
+            RefreshOnlineLobby("请先登录，然后进入在线大厅。");
+        }
+
+        private void CreateOnlineSlotDiagram(Transform parent)
+        {
+            GameObject diagramObject = new GameObject("OnlineSlotDiagram", typeof(RectTransform), typeof(Image), typeof(LayoutElement));
+            diagramObject.transform.SetParent(parent, false);
+            RectTransform diagramRect = diagramObject.GetComponent<RectTransform>();
+            diagramRect.sizeDelta = new Vector2(900f, 380f);
+            Image diagramImage = diagramObject.GetComponent<Image>();
+            diagramImage.color = new Color(1f, 1f, 1f, 0.36f);
+            diagramImage.raycastTarget = false;
+            SetLayoutElement(diagramRect, 380f);
+
+            Dictionary<SlotId, Vector2> positions = GetOnlineSlotDiagramPositions();
+            SlotId[] slots = BoardLayout.GetSlotsInDisplayOrder();
+            for (int i = 0; i < slots.Length; i++)
+            {
+                CreateOnlineSlotDiagramLine(diagramObject.transform, positions[slots[i]], positions[slots[(i + 1) % slots.Length]], 2f, new Color(0.58f, 0.64f, 0.68f, 0.24f));
+            }
+
+            CreateOnlineSlotDiagramLine(diagramObject.transform, positions[SlotId.Top], positions[SlotId.Bottom], 2f, new Color(0.58f, 0.64f, 0.68f, 0.2f));
+            CreateOnlineSlotDiagramLine(diagramObject.transform, positions[SlotId.TopRight], positions[SlotId.BottomLeft], 2f, new Color(0.58f, 0.64f, 0.68f, 0.2f));
+            CreateOnlineSlotDiagramLine(diagramObject.transform, positions[SlotId.BottomRight], positions[SlotId.TopLeft], 2f, new Color(0.58f, 0.64f, 0.68f, 0.2f));
+
+            GameObject center = new GameObject("OnlineSlotDiagramCenter", typeof(RectTransform), typeof(Image));
+            center.transform.SetParent(diagramObject.transform, false);
+            RectTransform centerRect = center.GetComponent<RectTransform>();
+            centerRect.anchorMin = new Vector2(0.5f, 0.5f);
+            centerRect.anchorMax = new Vector2(0.5f, 0.5f);
+            centerRect.sizeDelta = new Vector2(142f, 142f);
+            centerRect.anchoredPosition = Vector2.zero;
+            Image centerImage = center.GetComponent<Image>();
+            centerImage.sprite = GenerateHexCellSprite();
+            centerImage.color = new Color(BoardCellColor.r, BoardCellColor.g, BoardCellColor.b, 0.42f);
+            centerImage.raycastTarget = false;
+
+            for (int i = 0; i < slots.Length; i++)
+            {
+                CreateOnlineSlotNode(diagramObject.transform, slots[i], positions[slots[i]]);
+            }
+        }
+
+        private static Dictionary<SlotId, Vector2> GetOnlineSlotDiagramPositions()
+        {
+            float radius = 120f;
+            Dictionary<SlotId, Vector2> positions = new Dictionary<SlotId, Vector2>();
+            positions[SlotId.Top] = GetOnlineSlotDiagramPosition(-90f, radius);
+            positions[SlotId.TopRight] = GetOnlineSlotDiagramPosition(-30f, radius);
+            positions[SlotId.BottomRight] = GetOnlineSlotDiagramPosition(30f, radius);
+            positions[SlotId.Bottom] = GetOnlineSlotDiagramPosition(90f, radius);
+            positions[SlotId.BottomLeft] = GetOnlineSlotDiagramPosition(150f, radius);
+            positions[SlotId.TopLeft] = GetOnlineSlotDiagramPosition(210f, radius);
+            return positions;
+        }
+
+        private static Vector2 GetOnlineSlotDiagramPosition(float degrees, float radius)
+        {
+            float radians = degrees * Mathf.Deg2Rad;
+            return new Vector2(Mathf.Cos(radians) * radius, -Mathf.Sin(radians) * radius);
+        }
+
+        private void CreateOnlineSlotDiagramLine(Transform parent, Vector2 start, Vector2 end, float thickness, Color color)
+        {
+            GameObject lineObject = new GameObject("OnlineSlotDiagramLine", typeof(RectTransform), typeof(Image));
+            lineObject.transform.SetParent(parent, false);
+            RectTransform rect = lineObject.GetComponent<RectTransform>();
+            Vector2 delta = end - start;
+            rect.anchorMin = new Vector2(0.5f, 0.5f);
+            rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.sizeDelta = new Vector2(delta.magnitude, thickness);
+            rect.anchoredPosition = start + delta * 0.5f;
+            rect.localRotation = Quaternion.Euler(0f, 0f, Mathf.Atan2(delta.y, delta.x) * Mathf.Rad2Deg);
+            Image image = lineObject.GetComponent<Image>();
+            image.color = color;
+            image.raycastTarget = false;
+        }
+
+        private void CreateOnlineSlotNode(Transform parent, SlotId slotId, Vector2 position)
+        {
+            const float nodeSize = 106f;
+            GameObject nodeObject = new GameObject("OnlineSlotNode_" + slotId, typeof(RectTransform), typeof(Image), typeof(Button));
+            nodeObject.transform.SetParent(parent, false);
+            RectTransform rect = nodeObject.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0.5f, 0.5f);
+            rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.sizeDelta = new Vector2(nodeSize, nodeSize);
+            rect.anchoredPosition = position;
+
+            Image nodeImage = nodeObject.GetComponent<Image>();
+            nodeImage.sprite = GeneratePieceSprite();
+            nodeImage.color = SoftenPieceColor(BoardLayout.GetPieceColor(slotId));
+
+            Button button = nodeObject.GetComponent<Button>();
+            button.transition = Selectable.Transition.None;
+            button.onClick.AddListener(() =>
+            {
+                PlaySfx("button");
+                SelectOnlineSlot(slotId);
+            });
+            onlineSlotButtons[slotId] = button;
+            onlineSlotNodeImages[slotId] = nodeImage;
+
+            GameObject ringObject = CreateCircleImage("Ring", nodeObject.transform, nodeSize + 14f, Color.white);
+            Image ringImage = ringObject.GetComponent<Image>();
+            ringImage.sprite = GenerateRingSprite();
+            ringImage.raycastTarget = false;
+            onlineSlotNodeRings[slotId] = ringImage;
+
+            TMP_Text slotLabel = CreateText("SlotLabel", nodeObject.transform, BoardLayout.GetSlotLabel(slotId), 24, FontStyle.Bold, new Color(0.32f, 0.24f, 0.3f), TextAnchor.MiddleCenter, size: new Vector2(96f, 34f));
+            slotLabel.rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+            slotLabel.rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+            slotLabel.rectTransform.anchoredPosition = new Vector2(0f, 16f);
+            onlineSlotNodeLabels[slotId] = slotLabel;
+
+            TMP_Text nameLabel = CreateText("SeatLabel", nodeObject.transform, "空位", 20, FontStyle.Normal, new Color(0.24f, 0.22f, 0.26f, 0.72f), TextAnchor.MiddleCenter, size: new Vector2(104f, 30f));
+            nameLabel.rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+            nameLabel.rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+            nameLabel.rectTransform.anchoredPosition = new Vector2(0f, -18f);
+            nameLabel.enableWordWrapping = false;
+            onlineSlotNodeNames[slotId] = nameLabel;
+
+            TMP_Text badge = CreateText("HostBadge", nodeObject.transform, "★", 22, FontStyle.Bold, new Color(0.72f, 0.2f, 0.28f, 0.94f), TextAnchor.MiddleCenter, size: new Vector2(32f, 32f));
+            badge.rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+            badge.rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+            badge.rectTransform.anchoredPosition = new Vector2(0f, 54f);
+            badge.gameObject.SetActive(false);
+            onlineSlotNodeBadges[slotId] = badge;
         }
 
         private GameObject CreateOnlineRestartVoteModal(Transform parent)
@@ -3623,6 +4579,35 @@ namespace SweetJumpJump
             return modal;
         }
 
+        private GameObject CreateOnlineLoginConflictModal(Transform parent)
+        {
+            GameObject modal = new GameObject("OnlineLoginConflictModal", typeof(RectTransform), typeof(Image));
+            modal.transform.SetParent(parent, false);
+            RectTransform rect = modal.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            modal.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.42f);
+
+            GameObject card = new GameObject("LoginConflictCard", typeof(RectTransform), typeof(Image));
+            card.transform.SetParent(modal.transform, false);
+            RectTransform cardRect = card.GetComponent<RectTransform>();
+            cardRect.anchorMin = new Vector2(0.5f, 0.5f);
+            cardRect.anchorMax = new Vector2(0.5f, 0.5f);
+            cardRect.sizeDelta = new Vector2(760f, 360f);
+            cardRect.anchoredPosition = Vector2.zero;
+            card.GetComponent<Image>().color = new Color(1f, 0.98f, 0.99f, 0.98f);
+
+            CreateText("LoginConflictTitle", card.transform, "账号占用", 50, FontStyle.Bold, new Color(0.55f, 0.22f, 0.34f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.73f), new Vector2(0.5f, 0.73f), new Vector2(660f, 72f));
+            onlineLoginConflictText = CreateText("LoginConflictBody", card.transform, "这个账号已经在其他地方登录。是否踢掉原来的登录？", 30, FontStyle.Normal, new Color(0.48f, 0.32f, 0.4f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.55f), new Vector2(0.5f, 0.55f), new Vector2(660f, 78f));
+            CreateButton(card.transform, "踢掉原登录", ConfirmOnlineLoginTakeover, new Vector2(0.5f, 0.28f), new Vector2(0.5f, 0.28f), new Vector2(280f, 74f), new Vector2(-155f, 0f), ButtonLabelLength.SixCharacters);
+            CreateButton(card.transform, "取消", CancelOnlineLoginConflict, new Vector2(0.5f, 0.28f), new Vector2(0.5f, 0.28f), new Vector2(240f, 74f), new Vector2(155f, 0f), ButtonLabelLength.TwoCharacters);
+
+            modal.SetActive(false);
+            return modal;
+        }
+
         private GameObject CreateOnlineAiSettingsModal(Transform parent)
         {
             GameObject modal = new GameObject("OnlineAiSettingsModal", typeof(RectTransform), typeof(Image));
@@ -3678,6 +4663,30 @@ namespace SweetJumpJump
             layoutElement.preferredHeight = height;
             layoutElement.minHeight = height;
             return rowObject.transform;
+        }
+
+        private RectTransform CreateLayoutSection(Transform parent, string name)
+        {
+            GameObject sectionObject = new GameObject(name, typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(ContentSizeFitter), typeof(LayoutElement));
+            sectionObject.transform.SetParent(parent, false);
+            RectTransform rect = sectionObject.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0f, 1f);
+            rect.anchorMax = new Vector2(1f, 1f);
+            rect.pivot = new Vector2(0.5f, 1f);
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+
+            VerticalLayoutGroup layout = sectionObject.GetComponent<VerticalLayoutGroup>();
+            layout.spacing = 14f;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
+
+            sectionObject.GetComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            LayoutElement layoutElement = sectionObject.GetComponent<LayoutElement>();
+            layoutElement.flexibleWidth = 1f;
+            return rect;
         }
 
         private Button CreateLayoutButton(Transform parent, string label, Action onClick, ButtonLabelLength labelLength)
@@ -3763,11 +4772,40 @@ namespace SweetJumpJump
             victoryModal = CreateVictoryModal(gamePanel);
             exitConfirmModal = CreateExitConfirmModal(gamePanel);
             onlineHostSettingsModal = CreateOnlineHostSettingsModal(gamePanel);
+            onlineAutoFinishModal = CreateOnlineAutoFinishModal(gamePanel);
             if (onlineHostSettingsButton != null)
             {
                 onlineHostSettingsButton.gameObject.SetActive(false);
             }
             RefreshGameChromeStyle();
+        }
+
+        private GameObject CreateOnlineAutoFinishModal(Transform parent)
+        {
+            GameObject modal = new GameObject("OnlineAutoFinishModal", typeof(RectTransform), typeof(Image));
+            modal.transform.SetParent(parent, false);
+            RectTransform rect = modal.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            modal.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.38f);
+
+            GameObject card = new GameObject("OnlineAutoFinishCard", typeof(RectTransform), typeof(Image));
+            card.transform.SetParent(modal.transform, false);
+            RectTransform cardRect = card.GetComponent<RectTransform>();
+            cardRect.anchorMin = new Vector2(0.5f, 0.5f);
+            cardRect.anchorMax = new Vector2(0.5f, 0.5f);
+            cardRect.sizeDelta = new Vector2(720f, 320f);
+            cardRect.anchoredPosition = Vector2.zero;
+            card.GetComponent<Image>().color = new Color(1f, 0.98f, 0.99f, 0.98f);
+
+            CreateText("OnlineAutoFinishTitle", card.transform, "操作提醒", 48, FontStyle.Bold, new Color(0.55f, 0.22f, 0.34f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.72f), new Vector2(0.5f, 0.72f), new Vector2(640f, 72f));
+            onlineAutoFinishModalText = CreateText("OnlineAutoFinishText", card.transform, "你已经完成移动，请点击“完成移动”。", 30, FontStyle.Normal, new Color(0.48f, 0.32f, 0.4f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.52f), new Vector2(0.5f, 0.52f), new Vector2(640f, 70f));
+            CreateButton(card.transform, "立即完成", HandleFinishTurn, new Vector2(0.5f, 0.24f), new Vector2(0.5f, 0.24f), new Vector2(320f, 72f), Vector2.zero, ButtonLabelLength.FourCharacters);
+
+            modal.SetActive(false);
+            return modal;
         }
 
         private GameObject CreateOnlineHostSettingsModal(Transform parent)
@@ -3791,10 +4829,11 @@ namespace SweetJumpJump
             card.GetComponent<Image>().color = new Color(1f, 0.98f, 0.99f, 0.98f);
 
             CreateText("HostSettingsTitle", card.transform, "房间设置", 48, FontStyle.Bold, new Color(0.55f, 0.22f, 0.34f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.78f), new Vector2(0.5f, 0.78f), new Vector2(640f, 72f));
-            CreateText("HostSettingsBody", card.transform, "房主可以重开当前棋局，或解散房间。", 29, FontStyle.Normal, new Color(0.48f, 0.32f, 0.4f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.62f), new Vector2(0.5f, 0.62f), new Vector2(640f, 56f));
-            CreateButton(card.transform, "重开本局", RestartOnlineGameFromSettings, new Vector2(0.5f, 0.42f), new Vector2(0.5f, 0.42f), new Vector2(520f, 72f), Vector2.zero, ButtonLabelLength.FourCharacters);
-            CreateButton(card.transform, "解散房间", DisbandOnlineRoomFromSettings, new Vector2(0.5f, 0.25f), new Vector2(0.5f, 0.25f), new Vector2(520f, 72f), Vector2.zero, ButtonLabelLength.FourCharacters);
-            CreateButton(card.transform, "取消", HideOnlineHostSettings, new Vector2(0.5f, 0.09f), new Vector2(0.5f, 0.09f), new Vector2(520f, 64f), Vector2.zero, ButtonLabelLength.TwoCharacters);
+            CreateText("HostSettingsBody", card.transform, "房主可修改规则（开局前）、重开当前棋局，或解散房间。", 29, FontStyle.Normal, new Color(0.48f, 0.32f, 0.4f), TextAnchor.MiddleCenter, new Vector2(0.5f, 0.62f), new Vector2(0.5f, 0.62f), new Vector2(640f, 56f));
+            onlineHostRuleButton = CreateButton(card.transform, "规则：空跳", ToggleOnlineRoomRuleFromSettings, new Vector2(0.5f, 0.45f), new Vector2(0.5f, 0.45f), new Vector2(520f, 64f), Vector2.zero, ButtonLabelLength.FourCharacters);
+            CreateButton(card.transform, "重开本局", RestartOnlineGameFromSettings, new Vector2(0.5f, 0.31f), new Vector2(0.5f, 0.31f), new Vector2(520f, 64f), Vector2.zero, ButtonLabelLength.FourCharacters);
+            CreateButton(card.transform, "解散房间", DisbandOnlineRoomFromSettings, new Vector2(0.5f, 0.18f), new Vector2(0.5f, 0.18f), new Vector2(520f, 64f), Vector2.zero, ButtonLabelLength.FourCharacters);
+            CreateButton(card.transform, "取消", HideOnlineHostSettings, new Vector2(0.5f, 0.06f), new Vector2(0.5f, 0.06f), new Vector2(520f, 60f), Vector2.zero, ButtonLabelLength.TwoCharacters);
 
             modal.SetActive(false);
             return modal;

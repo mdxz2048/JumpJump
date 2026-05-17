@@ -119,7 +119,7 @@ namespace SweetJumpJump
     {
         public string RoomId = "default-room";
         public string RoomName = "默认房间";
-        public RuleVariant RuleVariant = RuleVariant.OnePieceJump;
+        public RuleVariant RuleVariant = RuleVariant.SpaceJump;
         public bool PromptEnabled;
         public int PromptIntervalSeconds = 30;
         public bool SoundEnabled = true;
@@ -131,7 +131,7 @@ namespace SweetJumpJump
     [Serializable]
     public sealed class GameOptions
     {
-        public RuleVariant DefaultRule = RuleVariant.OnePieceJump;
+        public RuleVariant DefaultRule = RuleVariant.SpaceJump;
         public bool PromptEnabled;
         public int PromptIntervalSeconds = 30;
         public bool SoundEnabled = true;
@@ -142,6 +142,7 @@ namespace SweetJumpJump
         public string OnlinePlayerName = string.Empty;
         public string OnlinePlayerAccount = string.Empty;
         public string OnlinePlayerPassword = string.Empty;
+        public string OnlineSessionToken = string.Empty;
         public bool OnlineDualDevice = true;
     }
 
@@ -216,7 +217,7 @@ namespace SweetJumpJump
     [Serializable]
     public sealed class AppSaveData
     {
-        public int SaveVersion = 4;
+        public int SaveVersion = 5;
         public bool Initialized;
         public GameOptions Options = new GameOptions();
         public List<RoomConfig> Rooms = new List<RoomConfig>();

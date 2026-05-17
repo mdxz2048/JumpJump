@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sweet Jump Jump</title>
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/styles.css?v=20260516-3">
   </head>
   <body>
     <main id="loginView" class="login-view">
@@ -155,8 +155,15 @@
           <button id="closeHostSettingsButton" class="secondary-button">取消</button>
         </div>
       </section>
+      <section id="autoFinishReminderModal" class="host-settings-modal hidden">
+        <div class="host-settings-card">
+          <div class="host-settings-title">操作提醒</div>
+          <div class="status">你已经完成移动，请点击“完成移动”。</div>
+          <button id="autoFinishReminderCloseButton" class="secondary-button">知道了</button>
+        </div>
+      </section>
     </main>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=20260516-3"></script>
   </body>
 </html>

@@ -9,6 +9,8 @@ using SweetJumpJump.Core;
 const string adminPassword = "xiaozhi2048-admin";
 const int defaultPort = 53333;
 TimeSpan createRoomCooldown = TimeSpan.FromSeconds(10);
+TimeSpan roomIdleTimeout = TimeSpan.FromMinutes(5);
+TimeSpan roomIdleSweepInterval = TimeSpan.FromSeconds(30);
 const string persistencePath = "data/accounts.json";
 
 int port = args.Length > 0 && int.TryParse(args[0], out int parsedPort) ? parsedPort : defaultPort;
@@ -24,6 +26,7 @@ JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web)
 ConcurrentDictionary<string, GameRoom> rooms = new(StringComparer.OrdinalIgnoreCase);
 ConcurrentDictionary<string, ClientPeer> clients = new(StringComparer.OrdinalIgnoreCase);
 ConcurrentDictionary<string, PlayerAccount> playerAccounts = new(StringComparer.OrdinalIgnoreCase);
+ConcurrentDictionary<string, string> sessionTokens = new(StringComparer.Ordinal);
 
 // Seed built-in accounts then overlay with persisted data
 playerAccounts["tian"] = new PlayerAccount("tian", "tian", "tian");
@@ -57,7 +60,8 @@ app.Map("/ws", async context =>
     await HandleClientAsync(peer);
 });
 
-app.MapGet("/health", () => Results.Ok(new { ok = true, service = "SweetJumpJumpServer" }));
+app.MapGet("/health", HealthHandler);
+_ = RunRoomIdleReaperAsync(app.Lifetime.ApplicationStopping);
 Console.WriteLine($"SweetJumpJump WebSocket server listening on http://0.0.0.0:{port}");
 await app.RunAsync();
 
@@ -93,7 +97,16 @@ async Task HandleClientAsync(ClientPeer peer)
         GameRoom? room = peer.Room;
         if (room != null)
         {
-            await room.RemovePeerAsync(peer, jsonOptions);
+            bool shouldRemove = !peer.Authenticated || peer.IsAdmin || peer.ExplicitRoomLeave;
+            if (shouldRemove)
+            {
+                await room.RemovePeerAsync(peer, jsonOptions);
+            }
+            else
+            {
+                await room.MarkPeerDisconnectedAsync(peer, jsonOptions);
+            }
+
             if (room.IsEmpty)
             {
                 rooms.TryRemove(room.Key, out _);
@@ -121,10 +134,16 @@ async Task HandleCommandAsync(ClientPeer peer, ClientCommand command)
             return;
         }
 
-        if (clients.Values.Any(value => value.Id != peer.Id && value.Authenticated && !value.IsAdmin && value.Account.Equals(account, StringComparison.OrdinalIgnoreCase) && value.Socket.State == WebSocketState.Open))
+        List<ClientPeer> activePeers = GetActiveAccountPeers(account, peer.Id);
+        if (activePeers.Count > 0 && !command.Force)
         {
-            await SendErrorAsync(peer, "这个账号已经在其他网页登录。");
+            await SendErrorAsync(peer, "这个账号已经在其他地方登录。是否踢掉原来的登录？", "AUTH_DUPLICATE");
             return;
+        }
+
+        if (activePeers.Count > 0)
+        {
+            await DisconnectActiveAccountSessionsAsync(account, peer.Id, "你的账号已在另一个地方登录，本端已下线。", "account replaced");
         }
 
         peer.Authenticated = true;
@@ -132,7 +151,77 @@ async Task HandleCommandAsync(ClientPeer peer, ClientCommand command)
         peer.IsDualDevice = command.DualDevice;
         peer.PreferredSlots = playerAccount.PreferredSlots ?? new List<string>();
         peer.Name = NormalizeName(playerAccount.DisplayName, account);
-        await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("AUTH_OK") { ClientId = peer.Id, Account = peer.Account, Name = peer.Name, DualDevice = peer.IsDualDevice, PreferredSlots = playerAccount.PreferredSlots ?? new(), Message = "进入成功。" }, jsonOptions);
+        peer.SessionToken = IssueSessionToken(account);
+        await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("AUTH_OK")
+        {
+            ClientId = peer.Id,
+            Account = peer.Account,
+            Name = peer.Name,
+            DualDevice = peer.IsDualDevice,
+            PreferredSlots = playerAccount.PreferredSlots ?? new(),
+            SessionToken = peer.SessionToken,
+            Message = "进入成功。"
+        }, jsonOptions);
+        await TryRestoreRoomForPeerAsync(peer);
+        await SendRoomListAsync(peer);
+        return;
+    }
+
+    if (type == "AUTH_TOKEN")
+    {
+        string token = command.SessionToken.Trim();
+        if (string.IsNullOrWhiteSpace(token) || !sessionTokens.TryGetValue(token, out string? account) || !playerAccounts.TryGetValue(account, out PlayerAccount? playerAccount))
+        {
+            await SendErrorAsync(peer, "登录已过期，请重新登录。", "AUTH_EXPIRED");
+            return;
+        }
+
+        if (playerAccount.Disabled)
+        {
+            await SendErrorAsync(peer, "账号已被禁用，请联系管理员。", "AUTH_DISABLED");
+            return;
+        }
+
+        List<ClientPeer> activePeers = GetActiveAccountPeers(account, peer.Id);
+        bool sameTokenReconnect = activePeers.Count > 0
+            && activePeers.All(value => !string.IsNullOrEmpty(value.SessionToken) && value.SessionToken == token);
+
+        if (activePeers.Count > 0 && !sameTokenReconnect && !command.Force)
+        {
+            await SendErrorAsync(peer, "这个账号已经在其他地方登录。是否踢掉原来的登录？", "AUTH_DUPLICATE");
+            return;
+        }
+
+        if (activePeers.Count > 0)
+        {
+            await DisconnectActiveAccountSessionsAsync(
+                account,
+                peer.Id,
+                sameTokenReconnect ? "你的账号已在另一个页面恢复登录，本端已下线。" : "你的账号已在另一个地方登录，本端已下线。",
+                sameTokenReconnect ? "same token resumed" : "account replaced");
+            if (!sameTokenReconnect)
+            {
+                token = IssueSessionToken(account);
+            }
+        }
+
+        peer.Authenticated = true;
+        peer.Account = account;
+        peer.IsDualDevice = command.DualDevice;
+        peer.PreferredSlots = playerAccount.PreferredSlots ?? new List<string>();
+        peer.Name = NormalizeName(playerAccount.DisplayName, account);
+        peer.SessionToken = token;
+        await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("AUTH_OK")
+        {
+            ClientId = peer.Id,
+            Account = peer.Account,
+            Name = peer.Name,
+            DualDevice = peer.IsDualDevice,
+            PreferredSlots = playerAccount.PreferredSlots ?? new(),
+            SessionToken = peer.SessionToken,
+            Message = "自动登录成功。"
+        }, jsonOptions);
+        await TryRestoreRoomForPeerAsync(peer);
         await SendRoomListAsync(peer);
         return;
     }
@@ -186,10 +275,13 @@ async Task HandleCommandAsync(ClientPeer peer, ClientCommand command)
             await EnablePlayerAsync(peer, command);
             break;
         case "SELECT_SLOT":
+            peer.IsDualDevice = false;
             await RequireRoom(peer, room => room.SelectSlotAsync(peer, command.Slot, jsonOptions));
             break;
         case "SELECT_SLOTS":
-            await RequireRoom(peer, room => room.SelectSlotsAsync(peer, command.Slots, jsonOptions, playerAccounts, PersistAccounts));
+            List<string> requestedSlots = command.Slots ?? new List<string>();
+            peer.IsDualDevice = requestedSlots.Count > 1;
+            await RequireRoom(peer, room => room.SelectSlotsAsync(peer, requestedSlots, jsonOptions, playerAccounts, PersistAccounts));
             break;
         case "LEAVE_ROOM":
             await LeaveCurrentRoomExplicitAsync(peer);
@@ -202,6 +294,9 @@ async Task HandleCommandAsync(ClientPeer peer, ClientCommand command)
             break;
         case "START":
             await RequireRoom(peer, room => room.StartAsync(peer, jsonOptions));
+            break;
+        case "SET_RULE":
+            await RequireRoom(peer, room => room.SetRuleVariantAsync(peer, command.RuleVariant, jsonOptions));
             break;
         case "RESTART_GAME":
             await RequireRoom(peer, room => room.RestartAsync(peer, jsonOptions));
@@ -414,7 +509,9 @@ async Task LeaveCurrentRoomExplicitAsync(ClientPeer peer)
     }
 
     GameRoom room = peer.Room;
+    peer.ExplicitRoomLeave = true;
     await room.RemovePeerAsync(peer, jsonOptions);
+    peer.ExplicitRoomLeave = false;
     if (room.IsEmpty) rooms.TryRemove(room.Key, out _);
     await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("LOBBY_RETURN") { Message = "已退出房间。" }, jsonOptions);
     await SendRoomListAsync(peer);
@@ -429,7 +526,9 @@ async Task LeaveCurrentRoomAsync(ClientPeer peer)
         return;
     }
 
+    peer.ExplicitRoomLeave = true;
     await room.RemovePeerAsync(peer, jsonOptions);
+    peer.ExplicitRoomLeave = false;
     if (room.IsEmpty)
     {
         rooms.TryRemove(room.Key, out _);
@@ -444,6 +543,7 @@ async Task RequireRoom(ClientPeer peer, Func<GameRoom, Task> action)
         return;
     }
 
+    peer.Room.MarkActivity();
     await action(peer.Room);
 }
 
@@ -462,6 +562,38 @@ async Task SendRoomListToAllAsync()
     foreach (ClientPeer peer in clients.Values.Where(peer => peer.Authenticated && peer.Socket.State == WebSocketState.Open))
     {
         await SendRoomListAsync(peer);
+    }
+}
+
+async Task RunRoomIdleReaperAsync(CancellationToken cancellationToken)
+{
+    using PeriodicTimer timer = new(roomIdleSweepInterval);
+    try
+    {
+        while (await timer.WaitForNextTickAsync(cancellationToken))
+        {
+            DateTime now = DateTime.UtcNow;
+            foreach (GameRoom room in rooms.Values.ToArray())
+            {
+                if (!room.IsIdleExpired(now, roomIdleTimeout))
+                {
+                    continue;
+                }
+
+                if (!rooms.TryRemove(room.Key, out GameRoom? removedRoom))
+                {
+                    continue;
+                }
+
+                await removedRoom.DisbandForIdleTimeoutAsync(jsonOptions, roomIdleTimeout);
+                await SendRoomListToAllAsync();
+                Console.WriteLine($"[room-timeout] room {removedRoom.Key} disbanded after {roomIdleTimeout.TotalMinutes:0} minutes of inactivity.");
+            }
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        // App is shutting down.
     }
 }
 
@@ -509,9 +641,80 @@ async Task SendAdminSnapshotAsync(ClientPeer peer)
     await SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ADMIN_SNAPSHOT") { Members = members, Rooms = roomSummaries, Accounts = accounts }, jsonOptions);
 }
 
-Task SendErrorAsync(ClientPeer peer, string message)
+Task SendErrorAsync(ClientPeer peer, string message, string code = "")
 {
-    return SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ERROR") { Message = message }, jsonOptions);
+    return SocketJson.SendAsync(peer.Socket, new ServerEnvelope("ERROR") { Message = message, Code = code }, jsonOptions);
+}
+
+List<ClientPeer> GetActiveAccountPeers(string account, string excludeClientId)
+{
+    return clients.Values
+        .Where(value => value.Id != excludeClientId
+            && value.Authenticated
+            && !value.IsAdmin
+            && value.Account.Equals(account, StringComparison.OrdinalIgnoreCase)
+            && value.Socket.State == WebSocketState.Open)
+        .ToList();
+}
+
+async Task DisconnectActiveAccountSessionsAsync(string account, string excludeClientId, string message, string closeReason)
+{
+    ClientPeer[] targets = GetActiveAccountPeers(account, excludeClientId).ToArray();
+    foreach (ClientPeer target in targets)
+    {
+        await SocketJson.SendAsync(target.Socket, new ServerEnvelope("SESSION_REPLACED")
+        {
+            Message = message,
+            Code = "SESSION_REPLACED"
+        }, jsonOptions);
+
+        if (target.Socket.State == WebSocketState.Open || target.Socket.State == WebSocketState.CloseReceived)
+        {
+            try
+            {
+                await target.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, closeReason, CancellationToken.None);
+            }
+            catch (WebSocketException exception)
+            {
+                Console.WriteLine($"close replaced session {target.Id} error: {exception.Message}");
+            }
+        }
+    }
+}
+
+string IssueSessionToken(string account)
+{
+    string token = Convert.ToHexString(Guid.NewGuid().ToByteArray()) + Convert.ToHexString(Guid.NewGuid().ToByteArray());
+    foreach (KeyValuePair<string, string> pair in sessionTokens.Where(pair => pair.Value.Equals(account, StringComparison.OrdinalIgnoreCase)).ToArray())
+    {
+        sessionTokens.TryRemove(pair.Key, out _);
+    }
+
+    sessionTokens[token] = account;
+    return token;
+}
+
+async Task TryRestoreRoomForPeerAsync(ClientPeer peer)
+{
+    if (peer.IsAdmin || string.IsNullOrWhiteSpace(peer.Account))
+    {
+        return;
+    }
+
+    GameRoom? room = rooms.Values.FirstOrDefault(value => value.TryRestorePeerByAccount(peer));
+    if (room == null)
+    {
+        return;
+    }
+
+    await room.SendRestoreEnvelopeAsync(peer, jsonOptions);
+    await room.BroadcastLobbyAsync(jsonOptions);
+    if (room.Started)
+    {
+        await room.BroadcastStateAsync(jsonOptions);
+    }
+
+    await SendRoomListToAllAsync();
 }
 
 static string NormalizeName(string value, string fallback)
@@ -576,6 +779,11 @@ static async Task<string?> ReceiveTextAsync(WebSocket socket, byte[] buffer)
     }
 }
 
+static IResult HealthHandler()
+{
+    return Results.Json(new HealthResponse { Ok = true, Service = "SweetJumpJumpServer" });
+}
+
 sealed class ClientPeer
 {
     public ClientPeer(WebSocket socket)
@@ -588,6 +796,7 @@ sealed class ClientPeer
     public WebSocket Socket { get; }
     public string Account { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public string SessionToken { get; set; } = string.Empty;
     public bool Authenticated { get; set; }
     public bool IsAdmin { get; set; }
     public bool IsDualDevice { get; set; }
@@ -599,6 +808,7 @@ sealed class ClientPeer
     public SlotId? Slot2 { get; set; }
     public GameRoom? Room { get; set; }
     public DateTime LastRoomCreatedAtUtc { get; set; } = DateTime.MinValue;
+    public bool ExplicitRoomLeave { get; set; }
 
     /// <summary>Returns all slots controlled by this peer.</summary>
     public IEnumerable<SlotId> ControlledSlots()
@@ -625,10 +835,13 @@ sealed class GameRoom
     private readonly object gate = new();
     private readonly List<ClientPeer> peers = new();
     private readonly Dictionary<SlotId, string> playerNames = new();
-    private readonly RuleVariant ruleVariant;
+    private RuleVariant ruleVariant;
     private string hostClientId = string.Empty;
     private GameSession? session;
     private int version;
+    private bool aiTurnRunnerActive;
+    private const int AiTurnStepDelayMs = 650;
+    private DateTime lastActivityAtUtc = DateTime.UtcNow;
 
     public GameRoom(string key, RuleVariant ruleVariant)
     {
@@ -692,6 +905,7 @@ sealed class GameRoom
                 notification = new ServerEnvelope("ROOM")
                 {
                     RoomKey = Key,
+                    RuleVariant = ruleVariant.ToString(),
                     Slot = slot,
                     ControlledSlots = new List<string> { slot.ToString() },
                     IsHost = IsHostLocked(peer),
@@ -794,6 +1008,7 @@ sealed class GameRoom
                     notification = new ServerEnvelope("ROOM")
                     {
                         RoomKey = Key,
+                        RuleVariant = ruleVariant.ToString(),
                         Slot = peer.Slot,
                         Slot2 = peer.Slot2,
                         DualDevice = isDual,
@@ -915,10 +1130,12 @@ sealed class GameRoom
                 if (string.IsNullOrEmpty(hostClientId)) hostClientId = peer.Id;
                 playerNames[pref1.Value] = Helpers.GenerateName(peer.Name, true, true);
                 playerNames[pref2!.Value] = Helpers.GenerateName(peer.Name, false, true);
+                TouchActivityLocked();
 
                 envelope = new ServerEnvelope("ROOM")
                 {
                     RoomKey = Key,
+                    RuleVariant = ruleVariant.ToString(),
                     Slot = pref1,
                     Slot2 = pref2,
                     DualDevice = true,
@@ -946,9 +1163,11 @@ sealed class GameRoom
                 peers.Add(peer);
                 if (string.IsNullOrEmpty(hostClientId)) hostClientId = peer.Id;
                 playerNames[slot] = peer.Name;
+                TouchActivityLocked();
                 envelope = new ServerEnvelope("ROOM")
                 {
                     RoomKey = Key,
+                    RuleVariant = ruleVariant.ToString(),
                     Slot = slot,
                     DualDevice = false,
                     ControlledSlots = new List<string> { slot.ToString() },
@@ -978,12 +1197,101 @@ sealed class GameRoom
             peer.Room = null;
             peer.Slot = null;
             peer.Slot2 = null;
+            TouchActivityLocked();
         }
 
         if (changed)
         {
             await BroadcastLobbyAsync(jsonOptions);
         }
+    }
+
+    public async Task MarkPeerDisconnectedAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
+    {
+        bool shouldBroadcast;
+        lock (gate)
+        {
+            shouldBroadcast = peers.Contains(peer);
+        }
+
+        if (!shouldBroadcast)
+        {
+            return;
+        }
+
+        await BroadcastLobbyAsync(jsonOptions);
+        if (Started)
+        {
+            await BroadcastStateAsync(jsonOptions);
+        }
+    }
+
+    public bool TryRestorePeerByAccount(ClientPeer newPeer)
+    {
+        lock (gate)
+        {
+            if (session == null && peers.Count == 0)
+            {
+                return false;
+            }
+
+            ClientPeer? existing = peers.FirstOrDefault(peer =>
+                peer.Id != newPeer.Id
+                && !string.IsNullOrWhiteSpace(peer.Account)
+                && peer.Account.Equals(newPeer.Account, StringComparison.OrdinalIgnoreCase));
+            if (existing == null)
+            {
+                return false;
+            }
+
+            newPeer.Room = this;
+            newPeer.Slot = existing.Slot;
+            newPeer.Slot2 = existing.Slot2;
+            newPeer.IsDualDevice = existing.IsDualDevice;
+
+            peers.Remove(existing);
+            peers.Add(newPeer);
+
+            if (hostClientId == existing.Id)
+            {
+                hostClientId = newPeer.Id;
+            }
+
+            if (newPeer.Slot.HasValue)
+            {
+                playerNames[newPeer.Slot.Value] = Helpers.GenerateName(newPeer.Name, true, newPeer.IsDualDevice);
+            }
+
+            if (newPeer.Slot2.HasValue)
+            {
+                playerNames[newPeer.Slot2.Value] = Helpers.GenerateName(newPeer.Name, false, newPeer.IsDualDevice);
+            }
+
+            TouchActivityLocked();
+
+            return true;
+        }
+    }
+
+    public Task SendRestoreEnvelopeAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
+    {
+        ServerEnvelope envelope;
+        lock (gate)
+        {
+            envelope = new ServerEnvelope("ROOM")
+            {
+                RoomKey = Key,
+                RuleVariant = ruleVariant.ToString(),
+                Slot = peer.Slot,
+                Slot2 = peer.Slot2,
+                ControlledSlots = peer.ControlledSlots().Select(slot => slot.ToString()).ToList(),
+                IsHost = IsHostLocked(peer),
+                DualDevice = peer.IsDualDevice,
+                Message = session == null ? "已自动恢复到原房间。" : "已自动恢复到原房间并继续对局。"
+            };
+        }
+
+        return SocketJson.SendAsync(peer.Socket, envelope, jsonOptions);
     }
 
     public async Task UpdatePeerNameAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
@@ -1024,7 +1332,6 @@ sealed class GameRoom
                 else
                 {
                     session = new GameSession(config);
-                    RunAiTurnsLocked();
                     version++;
                 }
             }
@@ -1037,6 +1344,41 @@ sealed class GameRoom
         }
 
         await BroadcastStateAsync(jsonOptions);
+        EnsureAiTurnRunner(jsonOptions);
+    }
+
+    public async Task SetRuleVariantAsync(ClientPeer peer, string requestedRuleVariant, JsonSerializerOptions jsonOptions)
+    {
+        ServerEnvelope? error = null;
+        lock (gate)
+        {
+            if (!IsHostLocked(peer))
+            {
+                error = new ServerEnvelope("ERROR") { Message = "只有房主可以修改规则。" };
+            }
+            else if (session != null)
+            {
+                error = new ServerEnvelope("ERROR") { Message = "棋局已开始，不能修改规则。" };
+            }
+            else if (!Enum.TryParse<RuleVariant>(requestedRuleVariant, true, out RuleVariant parsed))
+            {
+                error = new ServerEnvelope("ERROR") { Message = "无效的规则类型。" };
+            }
+            else
+            {
+                ruleVariant = parsed;
+                version++;
+                TouchActivityLocked();
+            }
+        }
+
+        if (error != null)
+        {
+            await SocketJson.SendAsync(peer.Socket, error, jsonOptions);
+            return;
+        }
+
+        await BroadcastLobbyAsync(jsonOptions);
     }
 
     public async Task RestartAsync(ClientPeer peer, JsonSerializerOptions jsonOptions)
@@ -1062,7 +1404,6 @@ sealed class GameRoom
                 else
                 {
                     session = new GameSession(config);
-                    RunAiTurnsLocked();
                     version++;
                 }
             }
@@ -1075,6 +1416,7 @@ sealed class GameRoom
         }
 
         await BroadcastStateAsync(jsonOptions);
+        EnsureAiTurnRunner(jsonOptions);
     }
 
     public async Task DisbandAsync(ClientPeer peer, JsonSerializerOptions jsonOptions,
@@ -1230,6 +1572,57 @@ sealed class GameRoom
         }
     }
 
+    public bool IsIdleExpired(DateTime nowUtc, TimeSpan timeout)
+    {
+        lock (gate)
+        {
+            if (peers.Count == 0)
+            {
+                return false;
+            }
+
+            return nowUtc - lastActivityAtUtc >= timeout;
+        }
+    }
+
+    public async Task DisbandForIdleTimeoutAsync(JsonSerializerOptions jsonOptions, TimeSpan timeout)
+    {
+        ClientPeer[] targets;
+        lock (gate)
+        {
+            targets = peers.ToArray();
+            foreach (ClientPeer target in targets)
+            {
+                target.Room = null;
+                target.Slot = null;
+                target.Slot2 = null;
+            }
+
+            peers.Clear();
+            playerNames.Clear();
+            session = null;
+            hostClientId = string.Empty;
+            version++;
+            TouchActivityLocked();
+        }
+
+        foreach (ClientPeer target in targets)
+        {
+            await SocketJson.SendAsync(target.Socket, new ServerEnvelope("ROOM_DISBANDED")
+            {
+                Message = $"房间已超过 {timeout.TotalMinutes:0} 分钟无人操作，已自动解散。"
+            }, jsonOptions);
+        }
+    }
+
+    public void MarkActivity()
+    {
+        lock (gate)
+        {
+            TouchActivityLocked();
+        }
+    }
+
     public ClientPeer[] PeersSnapshot()
     {
         lock (gate)
@@ -1256,7 +1649,6 @@ sealed class GameRoom
                 }
                 else
                 {
-                    RunAiTurnsLocked();
                     version++;
                 }
             }
@@ -1269,6 +1661,7 @@ sealed class GameRoom
         }
 
         await BroadcastStateAsync(jsonOptions);
+        EnsureAiTurnRunner(jsonOptions);
     }
 
     private RoomConfig BuildRoomConfig()
@@ -1315,17 +1708,83 @@ sealed class GameRoom
         return true;
     }
 
-    private void RunAiTurnsLocked()
+    private void EnsureAiTurnRunner(JsonSerializerOptions jsonOptions)
     {
-        int guard = 0;
-        while (session != null && !session.IsGameOver && BoardLayout.IsAi(session.CurrentPlayerKind) && guard++ < 24)
+        bool shouldStart = false;
+        lock (gate)
         {
-            session.ApplyAiMove(session.GetBestAiMove());
-            version++;
+            if (!aiTurnRunnerActive && session != null && !session.IsGameOver && BoardLayout.IsAi(session.CurrentPlayerKind))
+            {
+                aiTurnRunnerActive = true;
+                shouldStart = true;
+            }
+        }
+
+        if (shouldStart)
+        {
+            _ = RunAiTurnRunnerAsync(jsonOptions);
         }
     }
 
-    private async Task BroadcastStateAsync(JsonSerializerOptions jsonOptions)
+    private async Task RunAiTurnRunnerAsync(JsonSerializerOptions jsonOptions)
+    {
+        int guard = 0;
+        try
+        {
+            while (true)
+            {
+                MoveOption? move;
+                int stepCount;
+                lock (gate)
+                {
+                    if (session == null || session.IsGameOver || !BoardLayout.IsAi(session.CurrentPlayerKind) || guard++ >= 24)
+                    {
+                        aiTurnRunnerActive = false;
+                        return;
+                    }
+
+                    move = session.GetBestAiMove();
+                    stepCount = move == null ? 1 : Math.Max(1, move.Path.Count);
+                }
+
+                for (int step = 0; step < stepCount; step++)
+                {
+                    await Task.Delay(AiTurnStepDelayMs);
+                    lock (gate)
+                    {
+                        if (session == null || session.IsGameOver || !BoardLayout.IsAi(session.CurrentPlayerKind))
+                        {
+                            aiTurnRunnerActive = false;
+                            return;
+                        }
+
+                        if (move == null)
+                        {
+                            session.ApplyAiMove(null);
+                        }
+                        else
+                        {
+                            session.ApplyAiMoveStep(move, step);
+                        }
+
+                        version++;
+                    }
+
+                    await BroadcastStateAsync(jsonOptions);
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            Console.WriteLine($"AI turn runner error in room {Key}: {exception.Message}");
+            lock (gate)
+            {
+                aiTurnRunnerActive = false;
+            }
+        }
+    }
+
+    public async Task BroadcastStateAsync(JsonSerializerOptions jsonOptions)
     {
         GameSnapshot? snapshot;
         List<SeatSummary> seats;
@@ -1372,6 +1831,11 @@ sealed class GameRoom
     {
         return !string.IsNullOrEmpty(hostClientId) && peer.Id == hostClientId;
     }
+
+    private void TouchActivityLocked()
+    {
+        lastActivityAtUtc = DateTime.UtcNow;
+    }
 }
 
 sealed class ClientCommand
@@ -1379,12 +1843,14 @@ sealed class ClientCommand
     public string Type { get; set; } = string.Empty;
     public string Account { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
+    public string SessionToken { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string RoomKey { get; set; } = string.Empty;
     public string RuleVariant { get; set; } = string.Empty;
     public string Slot { get; set; } = string.Empty;
     public List<string> Slots { get; set; } = new();
     public bool DualDevice { get; set; }
+    public bool Force { get; set; }
     public string TargetClientId { get; set; } = string.Empty;
     public int PieceId { get; set; }
     public int Q { get; set; }
@@ -1403,12 +1869,15 @@ sealed class ServerEnvelope
     public string Account { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string RoomKey { get; set; } = string.Empty;
+    public string RuleVariant { get; set; } = string.Empty;
     public SlotId? Slot { get; set; }
     public SlotId? Slot2 { get; set; }
     public List<string> ControlledSlots { get; set; } = new();
     public bool DualDevice { get; set; }
     public List<string> PreferredSlots { get; set; } = new();
     public string Message { get; set; } = string.Empty;
+    public string Code { get; set; } = string.Empty;
+    public string SessionToken { get; set; } = string.Empty;
     public int Version { get; set; }
     public GameSnapshot? Snapshot { get; set; }
     public RoomSummary? Room { get; set; }
@@ -1509,4 +1978,10 @@ sealed class PersistedAccount
     public bool Disabled { get; set; }
     public bool PreferDualDevice { get; set; }
     public List<string> PreferredSlots { get; set; } = new();
+}
+
+sealed class HealthResponse
+{
+    public bool Ok { get; set; }
+    public string Service { get; set; } = string.Empty;
 }

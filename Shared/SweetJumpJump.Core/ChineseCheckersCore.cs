@@ -509,6 +509,39 @@ public sealed class GameSession
         FinishTurnInternal();
     }
 
+    public HexCoord ApplyAiMoveStep(MoveOption? move, int pathIndex)
+    {
+        if (move == null)
+        {
+            StatusMessage = "AI 没有合法行动，自动放弃移动。";
+            FinishTurnInternal(false);
+            return default;
+        }
+
+        if (pathIndex < 0 || pathIndex >= move.Path.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(pathIndex));
+        }
+
+        PieceState piece = piecesById[move.PieceId];
+        piecesByCoord.Remove(piece.Position);
+        piece.Position = move.Path[pathIndex];
+        piecesByCoord[piece.Position] = piece;
+        HasMovedThisTurn = true;
+
+        bool isLastStep = pathIndex == move.Path.Count - 1;
+        StatusMessage = isLastStep
+            ? $"{BoardLayout.GetSlotLabel(CurrentPlayerSlot)} 完成了 {(move.IsJump ? "跳跃行动" : "相邻移动")}。"
+            : $"{BoardLayout.GetSlotLabel(CurrentPlayerSlot)} 正在连续跳跃。";
+
+        if (isLastStep)
+        {
+            FinishTurnInternal();
+        }
+
+        return piece.Position;
+    }
+
     public GameSnapshot ToSnapshot()
     {
         return new GameSnapshot
